@@ -412,7 +412,10 @@ struct MinimapView: View {
                         }
                         
                         let indicatorWidth = max(20, width / CGFloat(viewModel.zoomLevel))
+                        // With this
                         let indicatorOffset = CGFloat(viewModel.scrollOffset) * width
+                                            + indicatorWidth / 2                 // move to the bar’s centre
+                                            - width / 2                          // shift because the ZStack is centred
                         
                         RoundedRectangle(cornerRadius: 4)
                             .fill(Color.blue.opacity(0.3))
@@ -435,8 +438,7 @@ struct MinimapView: View {
                             guard viewModel.zoomLevel > 1.0 else { return }
                             
                             let indicatorWidth = width / CGFloat(viewModel.zoomLevel)
-                            let indicatorHalfWidth = indicatorWidth / 2
-                            let targetOffset = (value.location.x - indicatorHalfWidth) / width
+                            let targetOffset = value.location.x / (width - indicatorWidth)
                             let maxScrollOffset = 1.0 - (1.0 / viewModel.zoomLevel)
                             viewModel.scrollOffset = max(0, min(maxScrollOffset, Double(targetOffset)))
                         }
@@ -446,8 +448,7 @@ struct MinimapView: View {
                                 guard viewModel.zoomLevel > 1.0 else { return }
                                 
                                 let indicatorWidth = width / CGFloat(viewModel.zoomLevel)
-                                let indicatorHalfWidth = indicatorWidth / 2
-                                let targetOffset = (value.location.x - indicatorHalfWidth) / width
+                                let targetOffset = value.location.x / (width - indicatorWidth)
                                 let maxScrollOffset = 1.0 - (1.0 / viewModel.zoomLevel)
                                 viewModel.scrollOffset = max(0, min(maxScrollOffset, Double(targetOffset)))
                             } else {
