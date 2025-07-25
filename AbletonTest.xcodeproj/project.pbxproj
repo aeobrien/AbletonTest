@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		DDE1503F2E3156F600AB9088 /* AudioKit in Frameworks */ = {isa = PBXBuildFile; productRef = DDE1503E2E3156F600AB9088 /* AudioKit */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		DDE1501F2E31534300AB9088 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -52,6 +56,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				DDE1503F2E3156F600AB9088 /* AudioKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +117,7 @@
 			);
 			name = AbletonTest;
 			packageProductDependencies = (
+				DDE1503E2E3156F600AB9088 /* AudioKit */,
 			);
 			productName = AbletonTest;
 			productReference = DDE150102E31534200AB9088 /* AbletonTest.app */;
@@ -195,6 +201,9 @@
 			);
 			mainGroup = DDE150072E31534200AB9088;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				DDE1503D2E3156F600AB9088 /* XCRemoteSwiftPackageReference "AudioKit" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = DDE150112E31534200AB9088 /* Products */;
 			projectDirPath = "";
@@ -551,6 +560,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		DDE1503D2E3156F600AB9088 /* XCRemoteSwiftPackageReference "AudioKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/AudioKit/AudioKit.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 5.6.5;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		DDE1503E2E3156F600AB9088 /* AudioKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = DDE1503D2E3156F600AB9088 /* XCRemoteSwiftPackageReference "AudioKit" */;
+			productName = AudioKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = DDE150082E31534200AB9088 /* Project object */;
 }
