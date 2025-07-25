@@ -16,7 +16,7 @@ import UniformTypeIdentifiers
 /// A single marker anchored to a sample position in the audio file.
 struct Marker: Identifiable, Hashable {
     let id = UUID()
-    let samplePosition: Int          // Exact sample index in the original file
+    var samplePosition: Int          // Exact sample index in the original file
     var group: Int? = nil            // Optional group number, assigned via drag‑selection
 }
 

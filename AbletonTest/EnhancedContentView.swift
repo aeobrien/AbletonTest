@@ -12,6 +12,7 @@ final class EnhancedAudioViewModel: ObservableObject {
     // Markers and selection
     @Published var markers: [Marker] = []
     @Published var tempSelection: ClosedRange<Int>? = nil
+    @Published var draggingMarkerIndex: Int? = nil
     
     // View controls
     @Published var showImporter = false
@@ -111,6 +112,30 @@ final class EnhancedAudioViewModel: ObservableObject {
     func addMarker(atX x: CGFloat, inWidth width: CGFloat) {
         let sample = sampleIndex(for: x, in: width)
         markers.append(Marker(samplePosition: sample))
+    }
+    
+    func findMarkerNearPosition(x: CGFloat, width: CGFloat, tolerance: CGFloat = 10) -> Int? {
+        for (index, marker) in markers.enumerated() {
+            let markerX = xPosition(for: marker.samplePosition, in: width)
+            if abs(markerX - x) <= tolerance {
+                return index
+            }
+        }
+        return nil
+    }
+    
+    func moveMarker(at index: Int, toX x: CGFloat, width: CGFloat) {
+        guard index >= 0 && index < markers.count else { return }
+        let oldSamplePosition = markers[index].samplePosition
+        let newSamplePosition = sampleIndex(for: x, in: width)
+        
+        // Update transientMarkers set if this is a transient marker
+        if markers[index].group == nil {
+            transientMarkers.remove(oldSamplePosition)
+            transientMarkers.insert(newSamplePosition)
+        }
+        
+        markers[index].samplePosition = newSamplePosition
     }
     
     func updateTempSelection(startX: CGFloat, currentX: CGFloat, width: CGFloat) {
@@ -322,6 +347,19 @@ struct EnhancedWaveformView: View {
                                         let color: Color = marker.group == nil ? .red : .green
                                         context.stroke(markerLine, with: .color(color), lineWidth: 2)
                                         
+                                        // Draw handle for transient markers (red markers without groups)
+                                        if marker.group == nil {
+                                            let handleSize: CGFloat = 12
+                                            let handleRect = CGRect(
+                                                x: x - handleSize / 2,
+                                                y: 0,
+                                                width: handleSize,
+                                                height: handleSize
+                                            )
+                                            context.fill(Path(ellipseIn: handleRect), with: .color(color))
+                                            context.stroke(Path(ellipseIn: handleRect), with: .color(.white), lineWidth: 1)
+                                        }
+                                        
                                         // Group label
                                         if let group = marker.group {
                                             let text = Text("\(group)")
@@ -361,21 +399,59 @@ struct EnhancedWaveformView: View {
                                 .fill(Color.clear)
                                 .frame(width: geometry.size.width, height: geometry.size.height)
                                 .contentShape(Rectangle())
+                                .onTapGesture(count: 2) { location in
+                                    print("Double tap @ \(location.x)")
+                                    // Check if we're near an existing marker
+                                    if let markerIndex = viewModel.findMarkerNearPosition(x: location.x, width: geometry.size.width) {
+                                        // Remove the marker
+                                        let marker = viewModel.markers[markerIndex]
+                                        if marker.group == nil {
+                                            viewModel.transientMarkers.remove(marker.samplePosition)
+                                        }
+                                        viewModel.markers.remove(at: markerIndex)
+                                    } else {
+                                        // Add a new marker
+                                        viewModel.addMarker(atX: location.x, inWidth: geometry.size.width)
+                                    }
+                                }
                                 .gesture(
                                     DragGesture(minimumDistance: 0)
                                         .onChanged { value in
-                                            print("Waveform drag changed @ \(value.location.x)")
-                                            viewModel.updateTempSelection(
-                                                startX: value.startLocation.x,
-                                                currentX: value.location.x,
-                                                width: geometry.size.width
-                                            )
+                                            // Check if we started dragging near a marker handle
+                                            if viewModel.draggingMarkerIndex == nil && value.translation.width == 0 && value.translation.height == 0 {
+                                                // Check if we're near a transient marker handle (at the top)
+                                                if value.startLocation.y < 20 {
+                                                    viewModel.draggingMarkerIndex = viewModel.findMarkerNearPosition(
+                                                        x: value.startLocation.x,
+                                                        width: geometry.size.width,
+                                                        tolerance: 10
+                                                    )
+                                                }
+                                            }
+                                            
+                                            if let dragIndex = viewModel.draggingMarkerIndex {
+                                                // We're dragging a marker
+                                                viewModel.moveMarker(at: dragIndex, toX: value.location.x, width: geometry.size.width)
+                                            } else {
+                                                // Normal selection drag
+                                                print("Waveform drag changed @ \(value.location.x)")
+                                                viewModel.updateTempSelection(
+                                                    startX: value.startLocation.x,
+                                                    currentX: value.location.x,
+                                                    width: geometry.size.width
+                                                )
+                                            }
                                         }
                                         .onEnded { value in
-                                            if abs(value.translation.width) < 5 {
-                                                print("Waveform tap @ \(value.location.x)")
-                                                viewModel.addMarker(atX: value.location.x, inWidth: geometry.size.width)
+                                            if let _ = viewModel.draggingMarkerIndex {
+                                                // End marker dragging
+                                                viewModel.draggingMarkerIndex = nil
+                                                print("Marker drag ended")
+                                            } else if abs(value.translation.width) < 5 && abs(value.translation.height) < 5 {
+                                                // This was a single tap - do nothing (wait for double tap)
+                                                print("Single tap ignored @ \(value.location.x)")
                                             } else {
+                                                // End selection drag
                                                 print("Waveform drag end")
                                                 viewModel.commitSelection()
                                             }
@@ -438,7 +514,8 @@ struct MinimapView: View {
                             guard viewModel.zoomLevel > 1.0 else { return }
                             
                             let indicatorWidth = width / CGFloat(viewModel.zoomLevel)
-                            let targetOffset = value.location.x / (width - indicatorWidth)
+                            // Center the indicator at the mouse position
+                            let targetOffset = (value.location.x - indicatorWidth / 2) / (width - indicatorWidth)
                             let maxScrollOffset = 1.0 - (1.0 / viewModel.zoomLevel)
                             viewModel.scrollOffset = max(0, min(maxScrollOffset, Double(targetOffset)))
                         }
@@ -448,7 +525,8 @@ struct MinimapView: View {
                                 guard viewModel.zoomLevel > 1.0 else { return }
                                 
                                 let indicatorWidth = width / CGFloat(viewModel.zoomLevel)
-                                let targetOffset = value.location.x / (width - indicatorWidth)
+                                // Center the indicator at the mouse position
+                                let targetOffset = (value.location.x - indicatorWidth / 2) / (width - indicatorWidth)
                                 let maxScrollOffset = 1.0 - (1.0 / viewModel.zoomLevel)
                                 viewModel.scrollOffset = max(0, min(maxScrollOffset, Double(targetOffset)))
                             } else {
