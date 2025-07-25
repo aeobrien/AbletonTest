@@ -39,15 +39,26 @@ final class EnhancedAudioViewModel: ObservableObject {
     
     // MARK: Import WAV with AudioKit approach
     func importWAV(from url: URL) {
+        print("=== IMPORT WAV START ===")
+        print("Attempting to import: \(url.absoluteString)")
+        
         do {
+            print("Creating AVAudioFile...")
             let file = try AVAudioFile(forReading: url)
             totalSamples = Int(file.length)
+            print("File length: \(file.length) samples")
+            print("Sample rate: \(file.fileFormat.sampleRate)")
+            print("Channel count: \(file.fileFormat.channelCount)")
             
             // Get float channel data using AudioKit's approach
+            print("Getting float channel data...")
             if let channelData = file.floatChannelData() {
+                print("Successfully got channel data")
                 // Use first channel for mono or left channel for stereo
                 let samples = channelData[0]
+                print("First channel has \(samples.count) samples")
                 sampleBuffer = SampleBuffer(samples: samples)
+                print("SampleBuffer created successfully")
                 
                 // Reset state
                 markers.removeAll()
@@ -60,15 +71,23 @@ final class EnhancedAudioViewModel: ObservableObject {
                 
                 // Auto-scale Y axis based on peak amplitude
                 let maxAmplitude = samples.map { abs($0) }.max() ?? 1.0
+                print("Max amplitude: \(maxAmplitude)")
                 if maxAmplitude > 0 {
                     // Scale so that the loudest part uses ~90% of the height
                     yScale = Double(0.9 / maxAmplitude)
                 } else {
                     yScale = 1.0
                 }
+                print("Y scale set to: \(yScale)")
+                print("=== IMPORT WAV SUCCESS ===")
+            } else {
+                print("ERROR: Failed to get float channel data")
+                print("=== IMPORT WAV FAILED ===")
             }
         } catch {
-            print("Audio import failed: \(error.localizedDescription)")
+            print("ERROR: Audio import failed: \(error.localizedDescription)")
+            print("Error details: \(error)")
+            print("=== IMPORT WAV FAILED ===")
         }
     }
     
@@ -260,21 +279,20 @@ struct EnhancedWaveformView: View {
     let height: CGFloat = 400  // Doubled height
     
     var body: some View {
-        GeometryReader { geometry in
-            ZStack {
-                // Background
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.black.opacity(0.05))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                    )
-                
-                // Clipped content area
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.clear)
-                    .clipped()
-                    .overlay(
+        ZStack {
+            // Background
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.black.opacity(0.05))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                )
+            
+            // Clipped content area with interaction
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.clear)
+                .overlay(
+                    GeometryReader { geometry in
                         ZStack {
                             // AudioKit Waveform (GPU accelerated)
                             if let buffer = viewModel.sampleBuffer {
@@ -285,6 +303,8 @@ struct EnhancedWaveformView: View {
                                 )
                                 .foregroundColor(.blue)
                                 .scaleEffect(y: CGFloat(viewModel.yScale))
+                                .clipped() // Ensure scaling doesn't extend beyond bounds
+                                .allowsHitTesting(false)
                             }
                             
                             // Markers overlay
@@ -335,34 +355,36 @@ struct EnhancedWaveformView: View {
                                 }
                             }
                             .allowsHitTesting(false)
-                        }
-                        .clipped()
-                    )
-                
-                // Interaction layer
-                Color.clear
-                    .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { value in
-                                viewModel.updateTempSelection(
-                                    startX: value.startLocation.x,
-                                    currentX: value.location.x,
-                                    width: geometry.size.width
+                            
+                            // Interaction layer - re-enabled now that Y scale is fixed
+                            Rectangle()
+                                .fill(Color.clear)
+                                .frame(width: geometry.size.width, height: geometry.size.height)
+                                .contentShape(Rectangle())
+                                .gesture(
+                                    DragGesture(minimumDistance: 0)
+                                        .onChanged { value in
+                                            print("Waveform drag changed @ \(value.location.x)")
+                                            viewModel.updateTempSelection(
+                                                startX: value.startLocation.x,
+                                                currentX: value.location.x,
+                                                width: geometry.size.width
+                                            )
+                                        }
+                                        .onEnded { value in
+                                            if abs(value.translation.width) < 5 {
+                                                print("Waveform tap @ \(value.location.x)")
+                                                viewModel.addMarker(atX: value.location.x, inWidth: geometry.size.width)
+                                            } else {
+                                                print("Waveform drag end")
+                                                viewModel.commitSelection()
+                                            }
+                                        }
                                 )
-                            }
-                            .onEnded { value in
-                                if abs(value.translation.width) < 5 {
-                                    viewModel.addMarker(atX: value.location.x, inWidth: geometry.size.width)
-                                } else {
-                                    viewModel.commitSelection()
-                                }
-                            }
-                    )
-                    .onTapGesture { location in
-                        viewModel.addMarker(atX: location.x, inWidth: geometry.size.width)
+                        }
                     }
-            }
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 8))
         }
         .frame(height: height)
     }
@@ -371,76 +393,70 @@ struct EnhancedWaveformView: View {
 // MARK: - Minimap for navigation
 struct MinimapView: View {
     @ObservedObject var viewModel: EnhancedAudioViewModel
-    @State private var debugLastEvent = "None"
-    @State private var debugEventCount = 0
     
     var body: some View {
-        ZStack {
-            GeometryReader { geometry in
-                // Debug info overlay
-                DebugOverlay(lastEvent: $debugLastEvent, eventCount: $debugEventCount)
-                    .position(x: 50, y: 20)
-                    .zIndex(100)
-                // Waveform preview
-                if let buffer = viewModel.sampleBuffer {
-                    Waveform(samples: buffer)
-                        .foregroundColor(.gray.opacity(0.5))
-                        .allowsHitTesting(false)
-                }
-                
-                // Interactive overlay for gestures
-                Color.clear
-                    .contentShape(Rectangle())
-                    .debugInteractions("Minimap", lastEvent: $debugLastEvent, eventCount: $debugEventCount)
-                    .simultaneousGesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { value in
-                                debugLastEvent = "Minimap drag at \(Int(value.location.x))"
-                                debugEventCount += 1
-                                print(">>> MINIMAP DRAG at: \(value.location) <<<")
+        GeometryReader { geometry in
+            // Put the visual stuff in a non-interactive overlay
+            let width = geometry.size.width
+            
+            Color.clear // <- guaranteed full-size, hittable surface
+                .overlay(
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.gray.opacity(0.1))
+                        
+                        if let buffer = viewModel.sampleBuffer {
+                            Waveform(samples: buffer)
+                                .foregroundColor(.gray.opacity(0.7))
+                                .allowsHitTesting(false)
+                        }
+                        
+                        let indicatorWidth = max(20, width / CGFloat(viewModel.zoomLevel))
+                        let indicatorOffset = CGFloat(viewModel.scrollOffset) * width
+                        
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.blue.opacity(0.3))
+                            .stroke(Color.blue, lineWidth: 1)
+                            .frame(width: indicatorWidth, height: geometry.size.height)
+                            .offset(x: indicatorOffset)
+                            .allowsHitTesting(false)
+                    }
+                    .cornerRadius(8)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                    )
+                )
+                .contentShape(Rectangle())
+                .highPriorityGesture( // <- make sure we win the arena
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            print("Minimap drag changed @ \(value.location.x)")
+                            guard viewModel.zoomLevel > 1.0 else { return }
+                            
+                            let indicatorWidth = width / CGFloat(viewModel.zoomLevel)
+                            let indicatorHalfWidth = indicatorWidth / 2
+                            let targetOffset = (value.location.x - indicatorHalfWidth) / width
+                            let maxScrollOffset = 1.0 - (1.0 / viewModel.zoomLevel)
+                            viewModel.scrollOffset = max(0, min(maxScrollOffset, Double(targetOffset)))
+                        }
+                        .onEnded { value in
+                            if abs(value.translation.width) < 5 && abs(value.translation.height) < 5 {
+                                print("Minimap tapped @ \(value.location.x)")
                                 guard viewModel.zoomLevel > 1.0 else { return }
                                 
-                                let indicatorHalfWidth = geometry.size.width / CGFloat(viewModel.zoomLevel) / 2
-                                let targetOffset = (value.location.x - indicatorHalfWidth) / geometry.size.width
-                                viewModel.scrollOffset = max(0, min(1 - 1/viewModel.zoomLevel, Double(targetOffset)))
+                                let indicatorWidth = width / CGFloat(viewModel.zoomLevel)
+                                let indicatorHalfWidth = indicatorWidth / 2
+                                let targetOffset = (value.location.x - indicatorHalfWidth) / width
+                                let maxScrollOffset = 1.0 - (1.0 / viewModel.zoomLevel)
+                                viewModel.scrollOffset = max(0, min(maxScrollOffset, Double(targetOffset)))
+                            } else {
+                                print("Minimap dragged end")
                             }
-                            .onEnded { value in
-                                if abs(value.translation.width) < 3 {
-                                    debugLastEvent = "Minimap tap at \(Int(value.location.x))"
-                                    debugEventCount += 1
-                                    print(">>> MINIMAP TAP at: \(value.location) <<<")
-                                    guard viewModel.zoomLevel > 1.0 else {
-                                        print("Not zoomed in, zoom level: \(viewModel.zoomLevel)")
-                                        return
-                                    }
-                                    
-                                    let indicatorHalfWidth = geometry.size.width / CGFloat(viewModel.zoomLevel) / 2
-                                    let targetOffset = (value.location.x - indicatorHalfWidth) / geometry.size.width
-                                    let clampedOffset = max(0, min(1 - 1/viewModel.zoomLevel, Double(targetOffset)))
-                                    print("Setting scroll offset to: \(clampedOffset)")
-                                    viewModel.scrollOffset = clampedOffset
-                                }
-                            }
-                    )
-                
-                // Visible area indicator (non-interactive)
-                let indicatorWidth = max(20, geometry.size.width / CGFloat(viewModel.zoomLevel))
-                let indicatorOffset = CGFloat(viewModel.scrollOffset) * geometry.size.width
-                
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.blue.opacity(0.3))
-                    .stroke(Color.blue, lineWidth: 1)
-                    .frame(width: indicatorWidth, height: geometry.size.height - 4)
-                    .offset(x: indicatorOffset)
-                    .allowsHitTesting(false)
-            }
+                        }
+                )
         }
         .frame(height: 60)
-        .cornerRadius(8)
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-        )
     }
 }
 
@@ -502,18 +518,16 @@ struct EnhancedContentView: View {
                 
                 Spacer()
                 
-                // Simplified button approach
-                Text("Detect Transients")
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(viewModel.sampleBuffer == nil ? Color.gray : Color.orange)
-                    .foregroundColor(.white)
-                    .cornerRadius(8)
-                    .onTapGesture {
-                        guard viewModel.sampleBuffer != nil else { return }
-                        print(">>> TRANSIENT BUTTON TAPPED <<<")
-                        viewModel.detectTransients()
-                    }
+                Button(action: {
+                    print(">>> TRANSIENT BUTTON TAPPED <<<")
+                    print("SampleBuffer is nil: \(viewModel.sampleBuffer == nil)")
+                    print("Total samples: \(viewModel.totalSamples)")
+                    viewModel.detectTransients()
+                }) {
+                    Text("Detect Transients")
+                }
+                .buttonStyle(OrangeButtonStyle())
+                .disabled(viewModel.sampleBuffer == nil)
                 
                 Button(action: { viewModel.showImporter = true }) {
                     Label("Import WAV", systemImage: "waveform")
@@ -521,6 +535,9 @@ struct EnhancedContentView: View {
                 .buttonStyle(.borderedProminent)
             }
             .padding(.horizontal)
+            .onAppear {
+                print("View appeared - SampleBuffer is nil: \(viewModel.sampleBuffer == nil)")
+            }
             
             // Minimap for navigation
             VStack(alignment: .leading, spacing: 4) {
@@ -529,8 +546,16 @@ struct EnhancedContentView: View {
                     .foregroundColor(.secondary)
                     .padding(.horizontal)
                 
+                // TEMPORARY: Re-enable minimap to test if it's the culprit
                 MinimapView(viewModel: viewModel)
                     .padding(.horizontal)
+                /*
+                Rectangle()
+                    .fill(Color.red.opacity(0.3))
+                    .frame(height: 60)
+                    .overlay(Text("MINIMAP DISABLED FOR TESTING"))
+                    .padding(.horizontal)
+                */
             }
             
             // Main waveform with markers
@@ -550,8 +575,17 @@ struct EnhancedContentView: View {
                 }
                 .padding(.horizontal)
                 
+                // TEMPORARY: Comment out waveform to test button interference
                 EnhancedWaveformView(viewModel: viewModel)
                     .padding(.horizontal)
+                    .clipped() // Ensure it doesn't extend beyond its bounds
+                /*
+                Rectangle()
+                    .fill(Color.blue.opacity(0.3))
+                    .frame(height: 400)
+                    .overlay(Text("WAVEFORM DISABLED FOR TESTING"))
+                    .padding(.horizontal)
+                */
             }
             
             // Controls
