@@ -36,7 +36,7 @@ final class EnhancedAudioViewModel: ObservableObject {
         return min(length, totalSamples - visibleStart)
     }
     
-    private var audioURL: URL?
+    var audioURL: URL?
     
     // MARK: Import WAV with AudioKit approach
     func importWAV(from url: URL) {

@@ -1,223 +1,375 @@
-// WaveformMarkerGrouping.swift
-// Full SwiftUI implementation – drop this file into a new Xcode SwiftUI project.
-// It lets you import a WAV file, visualise its waveform, add markers (sample indices),
-// box‑select regions by dragging to auto‑assign groups, and export the marker list.
-// Every major part is commented so you can follow what each piece does.
-//
-// ──────────────────────────────────────────────────────────────────────────────
-// MARK: ‑ Imports
 import SwiftUI
-import AVFoundation
 import UniformTypeIdentifiers
+import AppKit
 
-// ──────────────────────────────────────────────────────────────────────────────
-// MARK: ‑ Data Types
-
-/// A single marker anchored to a sample position in the audio file.
-struct Marker: Identifiable, Hashable {
-    let id = UUID()
-    var samplePosition: Int          // Exact sample index in the original file
-    var group: Int? = nil            // Optional group number, assigned via drag‑selection
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// MARK: ‑ View‑Model (business logic)
-
-/// Observable object that loads audio, down‑samples for drawing, manages markers & selection.
-@MainActor
-final class AudioViewModel: ObservableObject {
-    // Publicly observed properties for the UI
-    @Published var displaySamples: [Float] = []    // Down‑sampled amplitudes (|0…1|)
-    @Published var markers: [Marker] = []          // All current markers
-    @Published var tempSelection: ClosedRange<Int>? = nil // Live drag‑selection (sample indices)
-    @Published var showImporter = false            // Triggers the FileImporter sheet
-
-    // Internal bookkeeping
-    private(set) var totalSamples: Int = 0         // True length of the WAV in samples
-    private var audioURL: URL?                     // Keeps the imported file handy (future features)
-
-    // MARK: Import WAV
-    /// Reads a WAV file, converts to floats, and down‑samples for on‑screen drawing.
-    func importWAV(from url: URL) {
-        do {
-            let file = try AVAudioFile(forReading: url)
-            let format = file.processingFormat
-            totalSamples = Int(file.length)
-
-            // Pull the whole file into a buffer (mono‑only here for simplicity)
-            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(totalSamples)) else { return }
-            try file.read(into: buffer)
-            guard let channelData = buffer.floatChannelData?[0] else { return }
-
-            // Down‑sample to ~5 000 points for efficient drawing (adjust as you wish)
-            let points = 5_000
-            let step = max(1, totalSamples / points)           // «step» avoids shadowing Swift.stride()
-            displaySamples = stride(from: 0, to: totalSamples, by: step).map { abs(channelData[$0]) }
-
-            // Reset state
-            markers.removeAll()
-            tempSelection = nil
-            audioURL = url
-        } catch {
-            print("Audio import failed: \(error.localizedDescription)")
-        }
-    }
-
-    // MARK: Marker helpers
-    /// Converts an x‑coordinate in the waveform view to a sample index.
-    func sampleIndex(for x: CGFloat, width: CGFloat) -> Int {
-        guard totalSamples > 0 else { return 0 }
-        return min(max(Int((x / width) * CGFloat(totalSamples)), 0), totalSamples - 1)
-    }
-
-    /// Adds a marker at the tapped horizontal position.
-    func addMarker(atX x: CGFloat, inWidth width: CGFloat) {
-        let sample = sampleIndex(for: x, width: width)
-        markers.append(Marker(samplePosition: sample))
-    }
-
-    // MARK: Drag‑selection helpers
-    /// Updates the temporary selection during a drag gesture.
-    func updateTempSelection(startX: CGFloat, currentX: CGFloat, width: CGFloat) {
-        let startSample = sampleIndex(for: startX, width: width)
-        let currentSample = sampleIndex(for: currentX, width: width)
-        tempSelection = min(startSample, currentSample)...max(startSample, currentSample)
-    }
-
-    /// Finalises the selection: assigns all enclosed markers to a new group number.
-    func commitSelection() {
-        guard let range = tempSelection else { return }
-        let newGroup = (markers.compactMap { $0.group }.max() ?? 0) + 1
-        for i in markers.indices where range.contains(markers[i].samplePosition) {
-            markers[i].group = newGroup
-        }
-        tempSelection = nil
-    }
-
-    // MARK: Export
-    /// Serialises markers to pretty‑printed JSON (extend to file export if required).
-    func exportMarkersJSON() -> String? {
-        let payload = markers.map { ["sample": $0.samplePosition, "group": $0.group ?? 0] }
-        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: .prettyPrinted) else { return nil }
-        return String(data: data, encoding: .utf8)
-    }
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// MARK: ‑ Waveform Drawing View
-
-/// Renders the waveform, markers, and live selection overlay.
-struct WaveformView: View {
-    // Data inputs
-    let samples: [Float]
-    let totalSamples: Int
-    @Binding var markers: [Marker]
-    @Binding var selection: ClosedRange<Int>?
-
-    // Callbacks to the view‑model
-    let tapAction: (CGFloat, CGFloat) -> Void              // (x, width) → add marker
-    let dragUpdate: (CGFloat, CGFloat, CGFloat) -> Void    // (startX, currentX, width) → update sel.
-    let dragEnd: () -> Void                                // commit selection
-
-    // The body draws with Canvas and overlays a gesture‑aware transparent layer.
-    var body: some View {
-        GeometryReader { geo in
-            let width = geo.size.width
-            Canvas { context, size in
-                guard !samples.isEmpty else { return }
-                let midY = size.height / 2
-                let step = size.width / CGFloat(samples.count - 1)
-
-                // Waveform path (simple vertical line peak representation)
-                var path = Path()
-                for i in samples.indices {
-                    let x = CGFloat(i) * step
-                    let y = CGFloat(samples[i]) * midY
-                    path.move(to: CGPoint(x: x, y: midY - y))
-                    path.addLine(to: CGPoint(x: x, y: midY + y))
-                }
-                context.stroke(path, with: .color(.accentColor), lineWidth: 1)
-
-                // Draw existing markers
-                for marker in markers {
-                    let x = CGFloat(marker.samplePosition) / CGFloat(totalSamples) * size.width
-                    var markerLine = Path()
-                    markerLine.move(to: CGPoint(x: x, y: 0))
-                    markerLine.addLine(to: CGPoint(x: x, y: size.height))
-                    let colour: Color = marker.group == nil ? .red : .green
-                    context.stroke(markerLine, with: .color(colour), lineWidth: 1)
-
-                    // Tiny group label
-                    if let group = marker.group {
-                        let text = Text("\(group)").font(.caption2).foregroundColor(colour)
-                        context.draw(text, at: CGPoint(x: x + 4, y: 10))
-                    }
-                }
-
-                // Live selection rectangle
-                if let sel = selection {
-                    let xStart = CGFloat(sel.lowerBound) / CGFloat(totalSamples) * size.width
-                    let xEnd   = CGFloat(sel.upperBound) / CGFloat(totalSamples) * size.width
-                    let rect = CGRect(x: xStart, y: 0, width: xEnd - xStart, height: size.height)
-                    context.fill(Path(rect), with: .color(Color.blue.opacity(0.2)))
-                }
-            }
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        // Treat near‑static drags as taps (to get location in TapGesture SwiftUI 3‑)
-                        dragUpdate(value.startLocation.x, value.location.x, width)
-                    }
-                    .onEnded { value in
-                        if abs(value.translation.width) < 3 { // ≈ stationary → add marker
-                            tapAction(value.location.x, width)
-                        } else {
-                            dragEnd()
-                        }
-                    }
-            )
-        }
-        .frame(height: 200)   // Fixed height – adjust or make configurable
-    }
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// MARK: ‑ Main Content View
+// MARK: - Main Content View
 
 struct ContentView: View {
-    @State private var showTestView = false
+    @StateObject private var audioViewModel = EnhancedAudioViewModel()
+    @StateObject private var samplerViewModel = SamplerViewModel()
+    @StateObject private var midiManager = MIDIManager()
+    
+    @State private var showingBatchImport = false
+    @State private var showingGroupMapper = false
+    @State private var showingExportXML = false
+    @State private var batchImportURLs: [URL] = []
+    @State private var selectedTab = 0
     
     var body: some View {
-        if showTestView {
-            VStack {
-                TestButtonView()
-                Button("Back to Main View") {
-                    showTestView = false
-                }
-                .padding()
+        VStack(spacing: 0) {
+            // Tab selection
+            Picker("View", selection: $selectedTab) {
+                Text("Transient Detection").tag(0)
+                Text("Keyboard Mapping").tag(1)
             }
-        } else {
-            VStack {
-                // Use the enhanced version with zooming, scrolling, and GPU acceleration
-                EnhancedContentView()
-                
-                Button("Show Test View") {
-                    showTestView = true
-                }
-                .padding()
+            .pickerStyle(SegmentedPickerStyle())
+            .padding()
+            
+            if selectedTab == 0 {
+                // Transient Detection View
+                transientDetectionView
+            } else {
+                // Keyboard Mapping View
+                keyboardMappingView
+            }
+        }
+        .environmentObject(samplerViewModel)
+        .environmentObject(audioViewModel)
+        .environmentObject(midiManager)
+        .onAppear {
+            // Link the audio view model to the sampler view model
+            samplerViewModel.audioViewModel = audioViewModel
+        }
+        .sheet(isPresented: $showingBatchImport) {
+            BatchImportView(fileURLs: batchImportURLs)
+                .environmentObject(samplerViewModel)
+        }
+        .sheet(isPresented: $showingGroupMapper) {
+            GroupToVelocityMapperView(audioViewModel: audioViewModel)
+                .environmentObject(samplerViewModel)
+        }
+        .sheet(isPresented: $showingExportXML) {
+            if let xmlContent = generatePreviewXML() {
+                ExportXMLView(xmlContent: xmlContent)
             }
         }
     }
+    
+    // MARK: - Transient Detection View
+    
+    private var transientDetectionView: some View {
+        VStack(spacing: 20) {
+            // Header
+            HStack {
+                Text("Transient Detection & Grouping")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                
+                Spacer()
+                
+                Button(action: {
+                    audioViewModel.detectTransients()
+                }) {
+                    Text("Detect Transients")
+                }
+                .buttonStyle(OrangeButtonStyle())
+                .disabled(audioViewModel.sampleBuffer == nil)
+                
+                Button(action: { audioViewModel.showImporter = true }) {
+                    Label("Import WAV", systemImage: "waveform")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(.horizontal)
+            
+            // Minimap
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Overview")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal)
+                
+                MinimapView(viewModel: audioViewModel)
+                    .padding(.horizontal)
+            }
+            
+            // Main waveform
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Waveform")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
+                    Spacer()
+                    
+                    if audioViewModel.totalSamples > 0 {
+                        Text("Visible: \(audioViewModel.visibleStart)-\(audioViewModel.visibleStart + audioViewModel.visibleLength)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(.horizontal)
+                
+                EnhancedWaveformView(viewModel: audioViewModel)
+                    .padding(.horizontal)
+                    .clipped()
+            }
+            
+            // Controls
+            WaveformControls(viewModel: audioViewModel)
+                .padding(.vertical, 8)
+                .background(Color.gray.opacity(0.05))
+                .cornerRadius(8)
+                .padding(.horizontal)
+            
+            // Action buttons
+            HStack {
+                Button(action: {
+                    showingGroupMapper = true
+                }) {
+                    Label("Map Groups to Keys", systemImage: "piano")
+                }
+                .disabled(audioViewModel.markers.filter { $0.group != nil }.isEmpty)
+                
+                Spacer()
+                
+                Button(action: {
+                    audioViewModel.markers.removeAll()
+                    audioViewModel.transientMarkers.removeAll()
+                    audioViewModel.hasDetectedTransients = false
+                }) {
+                    Text("Clear All")
+                }
+                .foregroundColor(.red)
+                .disabled(audioViewModel.markers.isEmpty)
+            }
+            .padding(.horizontal)
+            
+            Spacer()
+        }
+        .padding(.vertical)
+        .fileImporter(
+            isPresented: $audioViewModel.showImporter,
+            allowedContentTypes: [.wav]
+        ) { result in
+            if case .success(let url) = result {
+                if url.startAccessingSecurityScopedResource() {
+                    defer { url.stopAccessingSecurityScopedResource() }
+                    audioViewModel.importWAV(from: url)
+                }
+            }
+        }
+    }
+    
+    // MARK: - Keyboard Mapping View
+    
+    private var keyboardMappingView: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Text("Keyboard & Velocity Mapping")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                
+                Spacer()
+                
+                Menu {
+                    Button(action: {
+                        // Show file picker for batch import
+                        let panel = NSOpenPanel()
+                        panel.allowsMultipleSelection = true
+                        panel.allowedContentTypes = [.wav]
+                        panel.begin { response in
+                            if response == .OK {
+                                batchImportURLs = panel.urls
+                                showingBatchImport = true
+                            }
+                        }
+                    }) {
+                        Label("Batch Import...", systemImage: "square.and.arrow.down.on.square")
+                    }
+                    
+                    Button(action: {
+                        showingGroupMapper = true
+                    }) {
+                        Label("Map Groups to Velocity Layers...", systemImage: "rectangle.3.group")
+                    }
+                    .disabled(audioViewModel.markers.filter { $0.group != nil }.isEmpty)
+                    
+                } label: {
+                    Label("Import", systemImage: "plus")
+                }
+                .menuStyle(.borderlessButton)
+                
+                Button(action: {
+                    samplerViewModel.saveToADVFile()
+                }) {
+                    Label("Export ADV", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(samplerViewModel.multiSampleParts.isEmpty)
+            }
+            .padding()
+            
+            // Piano keyboard
+            PianoKeyboardView(keys: $samplerViewModel.pianoKeys) { keyId in
+                samplerViewModel.selectKey(keyId)
+            }
+            .frame(height: 200)
+            .padding(.horizontal)
+            
+            Divider()
+            
+            // Velocity layers for selected key
+            if let selectedKeyId = samplerViewModel.selectedKeyId {
+                ScrollView {
+                    VelocityLayerGridView(
+                        velocityLayers: $samplerViewModel.velocityLayers,
+                        keyId: selectedKeyId
+                    )
+                }
+            } else {
+                VStack {
+                    Spacer()
+                    Text("Select a key to view its velocity layers")
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+            }
+            
+            // Status bar
+            HStack {
+                Text("\(samplerViewModel.multiSampleParts.count) samples loaded")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                Spacer()
+                
+                if samplerViewModel.currentMappingMode == .roundRobin {
+                    Label("Round Robin", systemImage: "arrow.triangle.2.circlepath")
+                        .font(.caption)
+                        .foregroundColor(.green)
+                }
+                
+                Button(action: {
+                    showingExportXML = true
+                }) {
+                    Text("Preview XML")
+                        .font(.caption)
+                }
+                .disabled(samplerViewModel.multiSampleParts.isEmpty)
+            }
+            .padding()
+            .background(Color.gray.opacity(0.05))
+        }
+        .alert("Error", isPresented: .constant(samplerViewModel.errorAlertMessage != nil)) {
+            Button("OK") {
+                samplerViewModel.errorAlertMessage = nil
+            }
+        } message: {
+            Text(samplerViewModel.errorAlertMessage ?? "")
+        }
+        .sheet(isPresented: $samplerViewModel.showingVelocitySplitPrompt) {
+            VelocitySplitPromptView(
+                pendingDropInfo: samplerViewModel.pendingDropInfo,
+                onComplete: { splitMode in
+                    if let dropInfo = samplerViewModel.pendingDropInfo {
+                        // Handle the dropped files with the selected split mode
+                        // This would need implementation based on your specific needs
+                    }
+                    samplerViewModel.showingVelocitySplitPrompt = false
+                    samplerViewModel.pendingDropInfo = nil
+                }
+            )
+        }
+    }
+    
+    // MARK: - Helper Methods
+    
+    private func generatePreviewXML() -> String? {
+        guard !samplerViewModel.multiSampleParts.isEmpty else { return nil }
+        
+        // Generate a preview of the XML (without file operations)
+        let projectPath = FileManager.default.temporaryDirectory.path
+        return samplerViewModel.generateFullXmlString(projectPath: projectPath)
+    }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// MARK: ‑ App Entry Point
+// MARK: - Velocity Split Prompt View
+
+struct VelocitySplitPromptView: View {
+    let pendingDropInfo: (midiNote: Int, fileURLs: [URL])?
+    let onComplete: (VelocitySplitMode) -> Void
+    @Environment(\.dismiss) var dismiss
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("How should these samples be split across velocities?")
+                .font(.headline)
+            
+            if let info = pendingDropInfo {
+                Text("\(info.fileURLs.count) files for note \(info.midiNote)")
+                    .foregroundColor(.secondary)
+            }
+            
+            VStack(alignment: .leading, spacing: 10) {
+                Button(action: {
+                    onComplete(.separate)
+                    dismiss()
+                }) {
+                    VStack(alignment: .leading) {
+                        Text("Separate Zones")
+                            .font(.headline)
+                        Text("Each sample gets its own velocity range with no overlap")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                    .background(Color.blue.opacity(0.1))
+                    .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+                
+                Button(action: {
+                    onComplete(.crossfade)
+                    dismiss()
+                }) {
+                    VStack(alignment: .leading) {
+                        Text("Crossfade Zones")
+                            .font(.headline)
+                        Text("Velocity ranges overlap for smooth transitions")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                    .background(Color.green.opacity(0.1))
+                    .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+            }
+            
+            Button("Cancel") {
+                dismiss()
+            }
+            .padding(.top)
+        }
+        .padding()
+        .frame(width: 400)
+    }
+}
+
+// MARK: - App Entry Point
 
 @main
-struct MarkerGroupingApp: App {
+struct AbletonTestApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .frame(minWidth: 800, minHeight: 600)
         }
+        .windowStyle(.automatic)
+        .windowToolbarStyle(.automatic)
     }
 }

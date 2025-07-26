@@ -1,0 +1,481 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 
+  Ableton Sampler Instrument (.adv) Template
+  This file provides the structure for creating a Sampler instrument patch.
+  It should be used as a guide for programmatically generating .adv files.
+  Values are placeholders and should be replaced with actual desired settings.
+  - Creator/Version info is likely required by Ableton Live for compatibility.
+-->
+<Ableton MajorVersion="5" MinorVersion="12.0_12203" SchemaChangeCount="3" Creator="Ableton Live 12.2.1" Revision="c0d59beb0465cc1bcc75830dbff2b10a48082a7d">
+	<MultiSampler>
+		<!-- =============================================================================== -->
+		<!-- METADATA AND GENERAL DEVICE SETTINGS                                            -->
+		<!-- =============================================================================== -->
+		<LomId Value="0" /> <!-- !GUESS: Internal Live Object Model ID. Keep as 0. -->
+		<LomIdView Value="0" /> <!-- !GUESS: Internal view state ID. Keep as 0. -->
+		<IsExpanded Value="true" /> <!-- Determines if the device is expanded or collapsed in the device view. -->
+		<On> <!-- Corresponds to the main On/Off switch for the device. -->
+			<LomId Value="0" />
+			<Manual Value="true" /> <!-- true = On, false = Off -->
+		</On>
+		<UserName Value="Your_Instrument_Name" /> <!-- The name of the preset, visible in Live's browser. -->
+		<Annotation Value="Your_Notes_Here" /> <!-- Corresponds to the info text box for the device. -->
+		<IsFolded Value="false" /> <!-- Determines if the device is folded (minimized) in the device view. -->
+
+		<!-- =============================================================================== -->
+		<!-- PLAYER SECTION (SAMPLE & ZONE TABS)                                             -->
+		<!-- This is the core section defining the samples and their playback behavior.      -->
+		<!-- =============================================================================== -->
+		<Player>
+			<MultiSampleMap>
+				<!-- This section holds the list of all samples loaded into the instrument. -->
+				<SampleParts>
+
+					<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+					<!-- EXAMPLE 1: SINGLE-SAMPLE INSTRUMENT                                         -->
+					<!-- To create an instrument with only one sample, include only one              -->
+					<!-- <MultiSamplePart> block like this one.                                      -->
+					<!-- Set KeyRange and VelocityRange to their maximums (0-127) to cover all input.-->
+					<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+					<MultiSamplePart Id="0" InitUpdateAreSlicesFromOnsetsEditableAfterRead="false" HasImportedSlicePoints="false" NeedsAnalysisData="false">
+						<LomId Value="0" />
+						<Name Value="My_Single_Sample" /> <!-- The name of the sample layer, visible in the Zone tab list. -->
+						<Selection Value="true" /> <!-- 'true' for the sample you want to be active for editing when the patch is loaded. -->
+						<IsActive Value="true" /> <!-- 'true' to enable this sample layer. -->
+						<Solo Value="false" /> <!-- 'true' to solo this sample layer. -->
+						
+						<!-- ZONE TAB: Key, Velocity, and Selector Ranges -->
+						<KeyRange>
+							<Min Value="0" />   <!-- Min MIDI note (0-127) -->
+							<Max Value="127" /> <!-- Max MIDI note (0-127) -->
+							<CrossfadeMin Value="0" />
+							<CrossfadeMax Value="127" />
+						</KeyRange>
+						<VelocityRange>
+							<Min Value="0" />   <!-- Min velocity (0-127) -->
+							<Max Value="127" /> <!-- Max velocity (0-127) -->
+							<CrossfadeMin Value="0" />
+							<CrossfadeMax Value="127" />
+						</VelocityRange>
+						<SelectorRange>
+							<Min Value="0" />   <!-- Min value for the Chain Selector -->
+							<Max Value="127" /> <!-- Max value for the Chain Selector -->
+							<CrossfadeMin Value="0" />
+							<CrossfadeMax Value="127" />
+						</SelectorRange>
+						
+						<!-- SAMPLE TAB: Per-sample settings -->
+						<RootKey Value="60" />        <!-- Root Key (original pitch). 60 = C4. -->
+						<Detune Value="0" />          <!-- Detune in cents (-50 to 50). -->
+						<TuneScale Value="100" />     <!-- Scale (pitch tracking) in percent (0-100). -->
+						<Panorama Value="0.0" />      <!-- Pan (-1.0 = 50L, 0.0 = C, 1.0 = 50R). -->
+						<Volume Value="1.0" />        <!-- Volume (linear gain, not dB. 1.0 = 0dB). -->
+						<Link Value="false" />        <!-- Link button (links Sustain Loop Start/End to Sample Start/End). -->
+						<SampleStart Value="0" />     <!-- Sample Start position in samples. -->
+						<SampleEnd Value="44100" />   <!-- Sample End position in samples. -->
+						
+						<!-- SAMPLE TAB: Sustain Loop section -->
+						<SustainLoop>
+							<Start Value="10000" />   <!-- Loop Start in samples. -->
+							<End Value="30000" />     <!-- Loop End in samples. -->
+							<!-- Mode: 0=Off, 1=Forward, 2=Forward w/Crossfade, 3=Back-and-Forth -->
+							<Mode Value="2" />
+							<Crossfade Value="500" /> <!-- Crossfade length in samples. -->
+							<Detune Value="0" />      <!-- Loop Detune in cents. -->
+						</SustainLoop>
+						
+						<!-- SAMPLE TAB: Release Loop section -->
+						<ReleaseLoop>
+							<Start Value="30000" />
+							<End Value="44000" />
+							<!-- Mode: 0=Off, 1=Forward, 2=Forward w/Crossfade, 3=Back-and-Forth -->
+							<Mode Value="0" />        
+							<Crossfade Value="0" />
+							<Detune Value="0" />
+						</ReleaseLoop>
+						
+						<!-- Reference to the audio file. This is critical. -->
+						<SampleRef>
+							<FileRef>
+								<!-- RelativePathType 3 means relative to the Project folder. -->
+								<RelativePathType Value="3" />
+								<RelativePath Value="Samples/Imported/Your_Sample_Path.wav" />
+								<Path Value="/Absolute/Path/To/Your/Sample.wav" />
+							</FileRef>
+						</SampleRef>
+					</MultiSamplePart>
+					
+					<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+					<!-- EXAMPLE 2: MULTI-SAMPLE INSTRUMENT (Velocity Layers & Round Robin)        -->
+					<!-- To create a multi-sample instrument, add multiple <MultiSamplePart> blocks. -->
+					<!-- Differentiate them using KeyRange, VelocityRange, or SelectorRange.       -->
+					<!-- This example shows 2 velocity layers, each with 2 round-robin samples.    -->
+					<!-- For Round Robin to work, enable it globally below (<RoundRobin Value="true"/>)-->
+					<!-- and give all round-robin samples the *exact same* Key and Velocity ranges.  -->
+					<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+					
+					<!-- Velocity Layer 1 (Soft): 1-64 -->
+					<MultiSamplePart Id="1"> <!-- RR 1 for soft layer -->
+						<Name Value="Soft_Sample_RR1" />
+						<Selection Value="false" />
+						<VelocityRange> <Min Value="1" /> <Max Value="64" /> </VelocityRange>
+						<KeyRange> <Min Value="0" /> <Max Value="127" /> </KeyRange>
+						<SampleRef> <FileRef> <RelativePath Value="Samples/Soft_RR1.wav"/> </FileRef> </SampleRef>
+						<!-- ... other parameters like RootKey, Detune, etc. ... -->
+					</MultiSamplePart>
+					<MultiSamplePart Id="2"> <!-- RR 2 for soft layer -->
+						<Name Value="Soft_Sample_RR2" />
+						<Selection Value="false" />
+						<VelocityRange> <Min Value="1" /> <Max Value="64" /> </VelocityRange>
+						<KeyRange> <Min Value="0" /> <Max Value="127" /> </KeyRange>
+						<SampleRef> <FileRef> <RelativePath Value="Samples/Soft_RR2.wav"/> </FileRef> </SampleRef>
+					</MultiSamplePart>
+					
+					<!-- Velocity Layer 2 (Loud): 65-127 -->
+					<MultiSamplePart Id="3"> <!-- RR 1 for loud layer -->
+						<Name Value="Loud_Sample_RR1" />
+						<Selection Value="false" />
+						<VelocityRange> <Min Value="65" /> <Max Value="127" /> </VelocityRange>
+						<KeyRange> <Min Value="0" /> <Max Value="127" /> </KeyRange>
+						<SampleRef> <FileRef> <RelativePath Value="Samples/Loud_RR1.wav"/> </FileRef> </SampleRef>
+					</MultiSamplePart>
+					<MultiSamplePart Id="4"> <!-- RR 2 for loud layer -->
+						<Name Value="Loud_Sample_RR2" />
+						<Selection Value="false" />
+						<VelocityRange> <Min Value="65" /> <Max Value="127" /> </VelocityRange>
+						<KeyRange> <Min Value="0" /> <Max Value="127" /> </KeyRange>
+						<SampleRef> <FileRef> <RelativePath Value="Samples/Loud_RR2.wav"/> </FileRef> </SampleRef>
+					</MultiSamplePart>
+
+				</SampleParts>
+				
+				<!-- Global Sample/Zone Settings -->
+				<LoadInRam Value="true" /> <!-- Sample Tab -> RAM button (On/Off) -->
+				<RoundRobin Value="true" /> <!-- Zone Tab -> RR (Round Robin) button (On/Off) -->
+			</MultiSampleMap>
+
+			<!-- Sample Tab -> Global settings -->
+			<Reverse> <Manual Value="false" /> </Reverse> <!-- Reverse button (On/Off) -->
+			<Snap> <Manual Value="false" /> </Snap>       <!-- Snap button (On/Off) -->
+			<!-- Interpolation Mode: 0=Nearest, 1=Linear, 2=Good, 3=Best !GUESS -->
+			<InterpolationMode Value="2" />
+
+			<!-- =============================================================================== -->
+			<!-- PITCH / OSCILLATOR SECTION (PITCH/OSC TAB)                                      -->
+			<!-- =============================================================================== -->
+			
+			<!-- 'Osc' section -->
+			<SubOsc>
+				<IsOn> <Manual Value="false" /> </IsOn> <!-- On/Off switch for the Oscillator -->
+				<Slot>
+					<Value>
+						<SimplerSubOsc>
+							<!-- Osc Type: 0-7 = Sin, Sin 4th, Sin 8th, Tri, Saw, Sqr, Sw 8, Sw 16... !GUESS -->
+							<Type> <Manual Value="0" /> </Type>
+							<Volume> <Manual Value="0.1" /> </Volume>         <!-- Volume (Linear gain, -40dB to +12dB) -->
+							<VolumeVelScale> <Manual Value="0.0" /> </VolumeVelScale> <!-- Vol<Vel (0-100%) -->
+							<IsFixedFreq> <Manual Value="false" /> </IsFixedFreq>   <!-- Fixed (On/Off) -->
+							<TuneCoarse> <Manual Value="0" /> </TuneCoarse>     <!-- Coarse (-2 to 48 st) -->
+							<TuneFine> <Manual Value="0" /> </TuneFine>         <!-- Fine (0-1000 cents) -->
+							
+							<!-- Oscillator Envelope -->
+							<Envelope>
+								<AttackTime> <Manual Value="1.0" /> </AttackTime>     <!-- Attack time in ms -->
+								<AttackLevel> <Manual Value="0.0" /> </AttackLevel>   <!-- Initial Level (Linear gain) -->
+								<DecayTime> <Manual Value="1000.0" /> </DecayTime>   <!-- Decay time in ms -->
+								<DecayLevel> <Manual Value="1.0" /> </DecayLevel>     <!-- Peak Level (Linear gain) -->
+								<SustainLevel> <Manual Value="1.0" /> </SustainLevel> <!-- Sustain Level (Linear gain) -->
+								<ReleaseTime> <Manual Value="50.0" /> </ReleaseTime>  <!-- Release time in ms -->
+								<ReleaseLevel> <Manual Value="0.0" /> </ReleaseLevel>  <!-- End Level (Linear gain) -->
+								<!-- Loop Mode: 0=None, 1=Loop, 2=Beat, 3=Sync, 4=Trigger -->
+								<LoopMode> <Manual Value="0" /> </LoopMode>
+								<TimeVelScale> <Manual Value="0.0" /> </TimeVelScale> <!-- Time<Vel (0-100%) -->
+							</Envelope>
+						</SimplerSubOsc>
+					</Value>
+				</Slot>
+			</SubOsc>
+		</Player>
+		
+		<!-- Pitch/Osc Tab -> Global Pitch & Pitch Envelope -->
+		<Pitch>
+			<TransposeKey> <Manual Value="0" /> </TransposeKey>   <!-- Transp (-48 to 48 st) -->
+			<TransposeFine> <Manual Value="0" /> </TransposeFine> <!-- Detune (-50 to 50 ct) -->
+			<PitchLfoAmount> <Manual Value="0.0" /> </PitchLfoAmount> <!-- Maps to Modulation Tab -> LFO 1 -> Pitch Amount (0-100%) -->
+
+			<!-- 'P.Env' (Pitch Envelope) section -->
+			<Envelope>
+				<IsOn> <Manual Value="false" /> </IsOn> <!-- On/Off switch for the Pitch Envelope -->
+				<Slot>
+					<Value>
+						<SimplerPitchEnvelope>
+							<Amount> <Manual Value="0.0" /> </Amount>         <!-- Amount (-48 to 48 st) -->
+							<AttackTime> <Manual Value="1.0" /> </AttackTime>   <!-- Attack time in ms -->
+							<AttackLevel> <Manual Value="0.0" /> </AttackLevel> <!-- Initial Level (-100% to 100%) -->
+							<DecayTime> <Manual Value="1000.0" /> </DecayTime> <!-- Decay time in ms -->
+							<DecayLevel> <Manual Value="1.0" /> </DecayLevel>   <!-- Peak Level (-100% to 100%) -->
+							<SustainLevel> <Manual Value="0.0" /> </SustainLevel><!-- Sustain Level (-100% to 100%) -->
+							<ReleaseTime> <Manual Value="50.0" /> </ReleaseTime><!-- Release time in ms -->
+							<ReleaseLevel> <Manual Value="0.0" /> </ReleaseLevel><!-- End Level (-100% to 100%) -->
+							<!-- Loop Mode: 0=None, 1=Loop, 2=Beat, 3=Sync, 4=Trigger -->
+							<LoopMode> <Manual Value="0" /> </LoopMode>
+							<TimeVelScale> <Manual Value="0.0" /> </TimeVelScale> <!-- Time<Vel (0-100%) -->
+						</SimplerPitchEnvelope>
+					</Value>
+				</Slot>
+			</Envelope>
+		</Pitch>
+		
+		<!-- =============================================================================== -->
+		<!-- FILTER & GLOBAL SECTION (FILTER/GLOBAL TAB)                                     -->
+		<!-- =============================================================================== -->
+
+		<!-- 'Filter' section -->
+		<Filter>
+			<IsOn> <Manual Value="true" /> </IsOn> <!-- On/Off switch for the Filter -->
+			<Slot>
+				<Value>
+					<SimplerFilter>
+						<!-- Type: 0=LP, 1=HP, 2=BP, 3=Notch, 4=Morph -->
+						<Type> <Manual Value="0" /> </Type>
+						<!-- Circuit: 0=Clean, 1=OSR, 2=MS2, 3=SMP, 4=PRD -->
+						<CircuitLpHp> <Manual Value="0" /> </CircuitLpHp>
+						<Slope> <Manual Value="false" /> </Slope>             <!-- Slope (false=12dB, true=24dB) -->
+						<Freq> <Manual Value="22000.0" /> </Freq>             <!-- Freq (30 to 22000 Hz) -->
+						<Res> <Manual Value="0.0" /> </Res>                   <!-- Res (0-125%) -->
+						<Drive> <Manual Value="0.0" /> </Drive>               <!-- Drive (0-24 dB) -->
+						<ModByPitch> <Manual Value="0.0" /> </ModByPitch>     <!-- Key modulation to Freq (0-100%) -->
+						<ModByVelocity> <Manual Value="0.0" /> </ModByVelocity> <!-- Vel modulation to Freq (0-100%) -->
+						<ModByLfo> <Manual Value="0.0" /> </ModByLfo>         <!-- Maps to Modulation Tab -> LFO 1 -> Filter Amount -->
+
+						<!-- 'F.Env' (Filter Envelope) section -->
+						<Envelope>
+							<IsOn> <Manual Value="false" /> </IsOn>
+							<Amount> <Manual Value="0.0" /> </Amount>         <!-- Amount (-72 to 72) -->
+							<AttackTime> <Manual Value="1.0" /> </AttackTime>   <!-- All envelope times are in ms -->
+							<AttackLevel> <Manual Value="0.0" /> </AttackLevel> <!-- Initial Level (0-100%) -->
+							<DecayTime> <Manual Value="1000.0" /> </DecayTime>
+							<DecayLevel> <Manual Value="1.0" /> </DecayLevel>   <!-- Peak Level (0-100%) -->
+							<SustainLevel> <Manual Value="0.5" /> </SustainLevel><!-- Sustain Level (0-100%) -->
+							<ReleaseTime> <Manual Value="50.0" /> </ReleaseTime>
+							<ReleaseLevel> <Manual Value="0.0" /> </ReleaseLevel> <!-- End Level (0-100%) -->
+							<LoopMode> <Manual Value="0" /> </LoopMode>
+							<TimeVelScale> <Manual Value="0.0" /> </TimeVelScale> <!-- Time<Vel (0-100%) -->
+							<AttackSlope> <Manual Value="0.0" /> </AttackSlope>  <!-- A.Slope (-100% to 100%) -->
+							<DecaySlope> <Manual Value="0.0" /> </DecaySlope>   <!-- D.Slope (-100% to 100%) -->
+							<ReleaseSlope> <Manual Value="0.0" /> </ReleaseSlope> <!-- R.Slope (-100% to 100%) -->
+						</Envelope>
+					</SimplerFilter>
+				</Value>
+			</Slot>
+		</Filter>
+
+		<!-- 'Shaper' section -->
+		<Shaper>
+			<IsOn> <Manual Value="false" /> </IsOn>
+			<Slot>
+				<Value>
+					<SimplerShaper>
+						<!-- Type: 0=Soft, 1=Hard, 2=Sine, 3=4-bit -->
+						<Type> <Manual Value="0" /> </Type>
+						<Amount> <Manual Value="0.0" /> </Amount> <!-- Amount (0-100) -->
+					</SimplerShaper>
+				</Value>
+			</Slot>
+		</Shaper>
+
+		<!-- Global Volume & Pan section -->
+		<VolumeAndPan>
+			<Volume> <Manual Value="0.0" /> </Volume>             <!-- Global Volume (-36 to 36 dB) -->
+			<VolumeVelScale> <Manual Value="0.0" /> </VolumeVelScale> <!-- Vol<Vel (0-100%) -->
+			<VolumeLfoAmount> <Manual Value="0.0" /> </VolumeLfoAmount> <!-- Maps to Modulation Tab -> LFO 1 -> Vol Amount -->
+			<Panorama> <Manual Value="0.0" /> </Panorama>         <!-- Pan (-1.0 to 1.0) -->
+			<PanoramaRnd> <Manual Value="0.0" /> </PanoramaRnd>     <!-- Pan<Rnd (0-100%) -->
+			<PanoramaLfoAmount> <Manual Value="0.0" /> </PanoramaLfoAmount> <!-- Maps to Modulation Tab -> LFO 1 -> Pan Amount -->
+
+			<!-- Main Volume Envelope -->
+			<Envelope>
+				<AttackTime> <Manual Value="1.0" /> </AttackTime>
+				<AttackLevel> <Manual Value="0.0" /> </AttackLevel>   <!-- Initial Level (Linear gain) -->
+				<DecayTime> <Manual Value="1000.0" /> </DecayTime>
+				<DecayLevel> <Manual Value="1.0" /> </DecayLevel>     <!-- Peak Level (Linear gain) -->
+				<SustainLevel> <Manual Value="1.0" /> </SustainLevel> <!-- Sustain Level (Linear gain) -->
+				<ReleaseTime> <Manual Value="50.0" /> </ReleaseTime>
+				<ReleaseLevel> <Manual Value="0.0" /> </ReleaseLevel>  <!-- End Level (Linear gain) -->
+				<LoopMode> <Manual Value="0" /> </LoopMode>
+				<TimeVelScale> <Manual Value="0.0" /> </TimeVelScale> <!-- Time<Vel (0-100%) -->
+			</Envelope>
+		</VolumeAndPan>
+
+		<!-- =============================================================================== -->
+		<!-- MODULATION SECTION (MODULATION TAB)                                             -->
+		<!-- =============================================================================== -->
+
+		<!-- 'Aux' Envelope -->
+		<AuxEnv>
+			<IsOn> <Manual Value="false" /> </IsOn>
+			<Slot>
+				<Value>
+					<SimplerAuxEnvelope>
+						<!-- Standard envelope parameters (Attack, Decay, etc.) as above -->
+						<!-- The modulation destinations for the Aux envelope -->
+						<ModDst>
+							<!-- Destination A -->
+							<ModConnections.0>
+								<Amount Value="0.0" /> <!-- Amount of modulation -->
+								<Connection Value="ID_OF_TARGET_PARAM_A" /> <!-- Internal ID of the parameter to modulate. -->
+							</ModConnections.0>
+							<!-- Destination B -->
+							<ModConnections.1>
+								<Amount Value="0.0" />
+								<Connection Value="ID_OF_TARGET_PARAM_B" />
+							</ModConnections.1>
+						</ModDst>
+					</SimplerAuxEnvelope>
+				</Value>
+			</Slot>
+		</AuxEnv>
+
+		<!-- 'LFO 1' -->
+		<Lfo>
+			<IsOn> <Manual Value="false" /> </IsOn>
+			<Slot>
+				<Value>
+					<SimplerLfo>
+						<!-- Type: 0=Sine, 1=Square, 2=Triangle, 3=Saw Down, 4=Saw Up, 5=S&H/Random -->
+						<Type> <Manual Value="0" /> </Type>
+						<RateType> <Manual Value="0" /> </RateType>         <!-- Rate Type (0=Hz, 1=Sync) -->
+						<Frequency> <Manual Value="1.0" /> </Frequency>     <!-- Freq in Hz (if RateType=0) -->
+						<!-- BeatRate: Maps to rhythmic values (e.g., 4=1/4, 8=1/8) if RateType=1 !GUESS -->
+						<BeatRate> <Manual Value="4" /> </BeatRate>
+						<Attack> <Manual Value="0.0" /> </Attack>           <!-- Attack time in ms -->
+						<Retrigger> <Manual Value="false" /> </Retrigger>   <!-- Retrig (On/Off) -->
+						<Offset> <Manual Value="0.0" /> </Offset>           <!-- Offset in degrees (0-360) -->
+						<FrequencyKeyScale> <Manual Value="0.0" /> </FrequencyKeyScale> <!-- Key tracking (0-100%) -->
+					</SimplerLfo>
+				</Value>
+			</Slot>
+		</Lfo>
+
+		<!-- 'LFO 2' -->
+		<AuxLfos.0>
+			<IsOn> <Manual Value="false" /> </IsOn>
+			<Slot>
+				<Value>
+					<SimplerAuxLfo>
+						<!-- Parameters are the same as LFO 1 -->
+						<Type> <Manual Value="0" /> </Type>
+						<RateType> <Manual Value="0" /> </RateType>
+						<!-- LFO 2 Modulation Destinations -->
+						<ModDst>
+							<ModConnections.0> <Amount Value="0.0" /> <Connection Value="ID_OF_TARGET_PARAM_A" /> </ModConnections.0>
+							<ModConnections.1> <Amount Value="0.0" /> <Connection Value="ID_OF_TARGET_PARAM_B" /> </ModConnections.1>
+						</ModDst>
+					</SimplerAuxLfo>
+				</Value>
+			</Slot>
+		</AuxLfos.0>
+
+		<!-- 'LFO 3' -->
+		<AuxLfos.1>
+			<IsOn> <Manual Value="false" /> </IsOn>
+			<Slot>
+				<Value>
+					<SimplerAuxLfo>
+						<!-- Parameters are the same as LFO 1 -->
+						<Type> <Manual Value="0" /> </Type>
+						<RateType> <Manual Value="0" /> </RateType>
+						<!-- LFO 3 Modulation Destinations -->
+						<ModDst>
+							<ModConnections.0> <Amount Value="0.0" /> <Connection Value="ID_OF_TARGET_PARAM_A" /> </ModConnections.0>
+							<ModConnections.1> <Amount Value="0.0" /> <Connection Value="ID_OF_TARGET_PARAM_B" /> </ModConnections.1>
+						</ModDst>
+					</SimplerAuxLfo>
+				</Value>
+			</Slot>
+		</AuxLfos.1>
+		
+		<!-- =============================================================================== -->
+		<!-- MIDI MODULATION MATRIX (MIDI TAB)                                               -->
+		<!-- =============================================================================== -->
+		<!-- Each section corresponds to a row in the MIDI tab matrix. -->
+		
+		<KeyDst> <!-- MIDI -> Key mapping -->
+			<ModConnections.0> <Amount Value="0.0" /> <Connection Value="ID_TARGET_1" /> </ModConnections.0>
+			<ModConnections.1> <Amount Value="0.0" /> <Connection Value="ID_TARGET_2" /> </ModConnections.1>
+		</KeyDst>
+		<VelDst> <!-- MIDI -> Velocity mapping -->
+			<ModConnections.0> <Amount Value="0.0" /> <Connection Value="ID_TARGET_1" /> </ModConnections.0>
+			<ModConnections.1> <Amount Value="0.0" /> <Connection Value="ID_TARGET_2" /> </ModConnections.1>
+		</VelDst>
+		<RelVelDst> <!-- MIDI -> Off Vel (Release Velocity) mapping -->
+			<ModConnections.0> <Amount Value="0.0" /> <Connection Value="ID_TARGET_1" /> </ModConnections.0>
+			<ModConnections.1> <Amount Value="0.0" /> <Connection Value="ID_TARGET_2" /> </ModConnections.1>
+		</RelVelDst>
+		<MidiCtrl.0> <!-- MIDI -> Pressure (Aftertouch) mapping -->
+			<ModConnections.0> <Amount Value="0.0" /> <Connection Value="ID_TARGET_1" /> </ModConnections.0>
+			<ModConnections.1> <Amount Value="0.0" /> <Connection Value="ID_TARGET_2" /> </ModConnections.1>
+		</MidiCtrl.0>
+		<MidiCtrl.1> <!-- MIDI -> Pitch Bend mapping -->
+			<ModConnections.0> <Amount Value="0.0" /> <Connection Value="ID_TARGET_1" /> </ModConnections.0>
+			<ModConnections.1> <Amount Value="0.0" /> <Connection Value="ID_TARGET_2" /> </ModConnections.1>
+		</MidiCtrl.1>
+		<MidiCtrl.2> <!-- MIDI -> Mod Wheel mapping -->
+			<ModConnections.0> <Amount Value="0.0" /> <Connection Value="ID_TARGET_1" /> </ModConnections.0>
+			<ModConnections.1> <Amount Value="0.0" /> <Connection Value="ID_TARGET_2" /> </ModConnections.1>
+		</MidiCtrl.2>
+		<MidiCtrl.3> <!-- MIDI -> Foot Ctrl mapping -->
+			<ModConnections.0> <Amount Value="0.0" /> <Connection Value="ID_TARGET_1" /> </ModConnections.0>
+			<ModConnections.1> <Amount Value="0.0" /> <Connection Value="ID_TARGET_2" /> </ModConnections.1>
+		</MidiCtrl.3>
+		<MidiCtrl.4> <!-- MIDI -> Slide mapping -->
+			<ModConnections.0> <Amount Value="0.0" /> <Connection Value="ID_TARGET_1" /> </ModConnections.0>
+			<ModConnections.1> <Amount Value="0.0" /> <Connection Value="ID_TARGET_2" /> </ModConnections.1>
+		</MidiCtrl.4>
+		<MidiCtrl.5> <!-- MIDI -> Note PB (MPE Pitch) mapping -->
+			<ModConnections.0> <Amount Value="0.0" /> <Connection Value="ID_TARGET_1" /> </ModConnections.0>
+			<ModConnections.1> <Amount Value="0.0" /> <Connection Value="ID_TARGET_2" /> </ModConnections.1>
+		</MidiCtrl.5>
+
+		<!-- =============================================================================== -->
+		<!-- GLOBALS SECTION (VARIOUS TABS)                                                  -->
+		<!-- =============================================================================== -->
+		<Globals>
+			<NumVoices Value="32" /> <!-- Filter/Global Tab -> Voices (1-64) -->
+			<RetriggerMode Value="false" /> <!-- Filter/Global Tab -> Retrigger button (R) next to Voices count. -->
+			<SpreadAmount> <Manual Value="0" /> </SpreadAmount>     <!-- Pitch/Osc Tab -> Spread (0-100%) -->
+			<KeyZoneShift> <Manual Value="0" /> </KeyZoneShift>     <!-- Pitch/Osc Tab -> Zn Shft (-48 to 48 st) -->
+			<!-- PortamentoMode: 0=Off, 1=Portamento, 2=Legato -->
+			<PortamentoMode> <Manual Value="0" /> </PortamentoMode> <!-- Pitch/Osc Tab -> Glide Mode -->
+			<PortamentoTime> <Manual Value="50.0" /> </PortamentoTime> <!-- Pitch/Osc Tab -> Glide Time in ms -->
+			<PitchBendRange Value="2" />  <!-- MIDI Tab -> Pitch Bend Range (0-24 st) -->
+			<MpePitchBendRange Value="48" /> <!-- MIDI Tab -> Note PB Range (0-48 st) -->
+			
+			<!-- Filter/Global Tab -> Time<Key Voices section -->
+			<EnvScale>
+				<EnvTimeKeyScale> <Manual Value="0" /> </EnvTimeKeyScale> <!-- Time<Key (-100% to 100%) -->
+			</EnvScale>
+		</Globals>
+
+		<!-- =============================================================================== -->
+		<!-- INTERNAL & UNUSED PARAMETERS                                                    -->
+		<!-- These parameters are part of the file structure but may not be directly user-   -->
+		<!-- configurable in the same way, or are for other device modes like Simpler.       -->
+		<!-- It is generally safe to leave these with default values.                        -->
+		<!-- =============================================================================== -->
+		<ModulationSourceCount Value="0" />
+		<ParametersListWrapper LomId="0" />
+		<LastPresetRef />
+		<LockedScripts />
+		<SourceContext />
+		<MpePitchBendUsesTuning Value="true" />
+		<OverwriteProtectionNumber Value="0" /> <!-- !GUESS: Internal number to prevent accidental overwriting. -->
+		<ViewSettings>
+			<SelectedPage Value="0" /> <!-- !GUESS: Which tab is open. 0=Sample, 1=Pitch/Osc, etc. -->
+			<ZoneEditorVisible Value="true" />
+		</ViewSettings>
+		<SimplerSlicing>
+			<PlaybackMode Value="0" /> <!-- For Simpler's slicing mode, not used in Sampler's main mode. -->
+		</SimplerSlicing>
+	</MultiSampler>
+</Ableton>
