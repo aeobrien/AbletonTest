@@ -187,7 +187,8 @@ struct VelocityLayerGridView: View {
                 .foregroundColor(.secondary)
                 .padding()
             } else {
-                ForEach(velocityLayers.indices, id: \.self) { layerIndex in
+                // Display velocity layers in reverse order (highest velocity first)
+                ForEach(velocityLayers.indices.reversed(), id: \.self) { layerIndex in
                     VelocityLayerRow(
                         layer: $velocityLayers[layerIndex],
                         layerIndex: layerIndex,
@@ -225,6 +226,7 @@ struct VelocityLayerRow: View {
     let layerIndex: Int
     let keyId: Int
     @EnvironmentObject var viewModel: SamplerViewModel
+    @State private var showPitchedModeSettings = false
     
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -234,6 +236,17 @@ struct VelocityLayerRow: View {
                     .fontWeight(.medium)
                 
                 Spacer()
+                
+                if layer.activeSampleCount > 0 {
+                    Menu {
+                        Button(action: { showPitchedModeSettings.toggle() }) {
+                            Label("Pitched Mode Settings...", systemImage: "slider.horizontal.3")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .foregroundColor(.secondary)
+                    }
+                }
                 
                 Text("\(layer.activeSampleCount) samples")
                     .font(.caption)
@@ -270,6 +283,10 @@ struct VelocityLayerRow: View {
         .padding()
         .background(Color.gray.opacity(0.1))
         .cornerRadius(8)
+        .sheet(isPresented: $showPitchedModeSettings) {
+            PitchedModeSettingsView(layer: $layer, keyId: keyId)
+                .environmentObject(viewModel)
+        }
     }
     
     private func handleSampleDrop(url: URL, rrIndex: Int) {
@@ -292,6 +309,7 @@ struct VelocityLayerRow: View {
                 lastModDate: fileAttributes?[.modificationDate] as? Date,
                 originalFileFrameCount: Int64(audioFile.length)
             )
+            // Note: rootKey is automatically set to keyRangeMin in the struct
             
             // Update layer
             while layer.samples.count <= rrIndex {
@@ -317,21 +335,35 @@ struct RoundRobinSlot: View {
     let onDrop: (URL) -> Void
     
     @State private var isTargeted = false
+    @State private var isPlaying = false
+    @EnvironmentObject var samplerViewModel: SamplerViewModel
     
     var body: some View {
         VStack(spacing: 4) {
             if let sample = sample {
                 VStack(spacing: 2) {
-                    Image(systemName: "waveform")
+                    Image(systemName: isPlaying ? "waveform.circle.fill" : "waveform")
                         .font(.title3)
+                        .foregroundColor(isPlaying ? .white : .primary)
                     Text(sample.name)
                         .font(.caption2)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                        .foregroundColor(isPlaying ? .white : .primary)
                 }
                 .frame(width: 80, height: 60)
-                .background(Color.green.opacity(0.3))
+                .background(isPlaying ? Color.blue : Color.green.opacity(0.3))
                 .cornerRadius(8)
+                .onTapGesture {
+                    isPlaying = true
+                    samplerViewModel.playSamplePart(sample)
+                    
+                    // Reset visual state after expected duration
+                    let duration = Double(sample.segmentEndSample - sample.segmentStartSample) / (sample.sampleRate ?? 44100.0)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
+                        isPlaying = false
+                    }
+                }
             } else {
                 VStack(spacing: 2) {
                     Image(systemName: "plus.circle.dashed")
@@ -377,5 +409,149 @@ struct RoundRobinSlot: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Pitched Mode Settings View
+
+struct PitchedModeSettingsView: View {
+    @Binding var layer: VelocityLayer
+    let keyId: Int
+    @EnvironmentObject var viewModel: SamplerViewModel
+    @Environment(\.dismiss) var dismiss
+    
+    @State private var keyRangeMin = 0
+    @State private var keyRangeMax = 127
+    @State private var rootKey = 60
+    @State private var isPitched = false
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Pitched Mode Settings")
+                .font(.headline)
+                .padding(.top)
+            
+            Text("Configure how this velocity layer is mapped across keys")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            
+            Divider()
+            
+            // Pitched mode toggle
+            Toggle("Enable Pitched Mode", isOn: $isPitched)
+                .help("When enabled, the sample will be pitched up/down based on the key pressed")
+            
+            if isPitched {
+                // Root key selector
+                HStack {
+                    Text("Root Key:")
+                    Picker("", selection: $rootKey) {
+                        ForEach(0...127, id: \.self) { note in
+                            Text(noteNameForMIDI(note)).tag(note)
+                        }
+                    }
+                    .frame(width: 100)
+                }
+                .help("The original pitch of the sample")
+                
+                // Key range
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Key Range:")
+                        .font(.subheadline)
+                    
+                    HStack {
+                        Text("Min:")
+                        Picker("", selection: $keyRangeMin) {
+                            ForEach(0...keyRangeMax, id: \.self) { note in
+                                Text(noteNameForMIDI(note)).tag(note)
+                            }
+                        }
+                        .frame(width: 80)
+                        
+                        Text("Max:")
+                        Picker("", selection: $keyRangeMax) {
+                            ForEach(keyRangeMin...127, id: \.self) { note in
+                                Text(noteNameForMIDI(note)).tag(note)
+                            }
+                        }
+                        .frame(width: 80)
+                    }
+                }
+                .help("The range of keys that will trigger this sample")
+            }
+            
+            Divider()
+            
+            // Action buttons
+            HStack(spacing: 20) {
+                Button("Cancel") {
+                    dismiss()
+                }
+                
+                Button("Apply") {
+                    applySettings()
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            
+            Spacer()
+        }
+        .padding()
+        .frame(width: 400, height: 300)
+        .onAppear {
+            loadCurrentSettings()
+        }
+    }
+    
+    private func loadCurrentSettings() {
+        // Load current settings from the first sample in the layer
+        if let firstSample = layer.samples.compactMap({ $0 }).first {
+            isPitched = firstSample.isPitched
+            rootKey = firstSample.originalRootKey ?? firstSample.keyRangeMin
+            keyRangeMin = firstSample.keyRangeMin
+            keyRangeMax = firstSample.keyRangeMax
+        } else {
+            // Default for current key
+            rootKey = keyId
+            keyRangeMin = keyId
+            keyRangeMax = keyId
+        }
+    }
+    
+    private func applySettings() {
+        // Update all samples in the layer
+        for i in layer.samples.indices {
+            if var sample = layer.samples[i] {
+                sample.isPitched = isPitched
+                
+                if isPitched {
+                    // Enable pitched mode
+                    sample.originalRootKey = rootKey
+                    sample.keyRangeMin = keyRangeMin
+                    sample.keyRangeMax = keyRangeMax
+                } else {
+                    // Disable pitched mode
+                    sample.originalRootKey = nil
+                    sample.keyRangeMin = keyId
+                    sample.keyRangeMax = keyId
+                }
+                
+                // Update in layer
+                layer.samples[i] = sample
+                
+                // Update in view model
+                if let index = viewModel.multiSampleParts.firstIndex(where: { $0.id == sample.id }) {
+                    viewModel.multiSampleParts[index] = sample
+                }
+            }
+        }
+    }
+    
+    private func noteNameForMIDI(_ midiNote: Int) -> String {
+        let noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+        let octave = (midiNote / 12) - 2
+        let noteIndex = midiNote % 12
+        return "\(noteNames[noteIndex])\(octave)"
     }
 }

@@ -55,7 +55,16 @@ class SamplerViewModel: ObservableObject {
     private func updatePianoKeySampleStatus() {
         for i in pianoKeys.indices {
             let keyId = pianoKeys[i].id
-            pianoKeys[i].hasSample = multiSampleParts.contains { $0.keyRangeMin == keyId }
+            // Check if any sample covers this key (either directly mapped or in pitched range)
+            pianoKeys[i].hasSample = multiSampleParts.contains { sample in
+                if sample.isPitched {
+                    // For pitched samples, check if key is within the range
+                    return keyId >= sample.keyRangeMin && keyId <= sample.keyRangeMax
+                } else {
+                    // For non-pitched samples, only the exact key
+                    return sample.keyRangeMin == keyId
+                }
+            }
         }
     }
     
@@ -166,6 +175,7 @@ class SamplerViewModel: ObservableObject {
             lastModDate: lastModDate,
             originalFileFrameCount: Int64(sampleBuffer.samples.count)
         )
+        // Note: rootKey is automatically set to keyRangeMin in the struct
     }
     
     private func calculateVelocityRanges(for count: Int, mode: VelocitySplitMode) -> [VelocityRangeData] {
@@ -180,7 +190,7 @@ class SamplerViewModel: ObservableObject {
         
         for i in 0..<count {
             let minVel = Int(Double(i) * step)
-            let maxVel = i == count - 1 ? 127 : Int(Double(i + 1) * step)
+            let maxVel = i == count - 1 ? 127 : Int(Double(i + 1) * step) - 1  // Subtract 1 to avoid overlap
             
             let range: VelocityRangeData
             if mode == .crossfade {
@@ -190,6 +200,7 @@ class SamplerViewModel: ObservableObject {
                 let cfMax = min(127, maxVel + crossfadeAmount)
                 range = VelocityRangeData(min: minVel, max: maxVel, crossfadeMin: cfMin, crossfadeMax: cfMax)
             } else {
+                // Separate mode - no overlap
                 range = VelocityRangeData(min: minVel, max: maxVel, crossfadeMin: minVel, crossfadeMax: maxVel)
             }
             ranges.append(range)
@@ -239,6 +250,7 @@ class SamplerViewModel: ObservableObject {
                     lastModDate: fileAttributes?[.modificationDate] as? Date,
                     originalFileFrameCount: Int64(audioFile.length)
                 )
+                // Note: rootKey is automatically set to keyRangeMin in the struct
                 
                 multiSampleParts.append(samplePart)
             }
@@ -355,8 +367,10 @@ class SamplerViewModel: ObservableObject {
     func generateFullXmlString(projectPath: String) -> String {
         let samplePartsXml = generateSamplePartsXml(projectPath: projectPath)
         
-        let roundRobinValue = currentMappingMode == .roundRobin ? "true" : "false"
-        let roundRobinModeValue = currentMappingMode == .roundRobin ? "2" : "0"
+        // Check if we have round robins (multiple samples with same key and velocity range)
+        let hasRoundRobins = detectRoundRobins()
+        let roundRobinValue = hasRoundRobins ? "true" : "false"
+        let roundRobinModeValue = "0" // 0 = cycle mode
         let randomSeed = Int.random(in: 1...1000000000)
         
         return """
@@ -427,8 +441,8 @@ class SamplerViewModel: ObservableObject {
                                 <Name Value="\(part.name)" />
                                 <SampleRef>
                                     <FileRef>
-                                        <RelativePathType Value="5" />
-                                        <RelativePath Value="\(relativePath)" />
+                                        <RelativePathType Value="3" />
+                                        <RelativePath Value="Samples/Imported/\(relativePath)" />
                                         <Path Value="\(part.absolutePath)" />
                                         <Type Value="2" />
                                         <LivePackName Value="" />
@@ -454,6 +468,12 @@ class SamplerViewModel: ObservableObject {
                                     <CrossfadeMin Value="\(part.velocityRange.crossfadeMin)" />
                                     <CrossfadeMax Value="\(part.velocityRange.crossfadeMax)" />
                                 </VelocityRange>
+                                <RootKey Value="\(part.rootKey)" />
+                                <Detune Value="\(part.detune)" />
+                                <TuneScale Value="\(part.tuneScale)" />
+                                <Panorama Value="\(part.panorama)" />
+                                <Volume Value="\(part.volume)" />
+                                <Link Value="\(part.link ? "true" : "false")" />
                                 <SampleStart Value="\(part.sampleStart)" />
                                 <SampleEnd Value="\(part.sampleEnd)" />
                                 <SustainLoop>
@@ -472,6 +492,55 @@ class SamplerViewModel: ObservableObject {
                                 </ReleaseLoop>
                             </MultiSamplePart>
         """
+    }
+    
+    // MARK: - Helper Methods
+    
+    private func detectRoundRobins() -> Bool {
+        // Group samples by key and velocity range
+        var groupedSamples: [String: Int] = [:]
+        
+        for part in multiSampleParts {
+            let key = "\(part.keyRangeMin)-\(part.keyRangeMax)_\(part.velocityRange.min)-\(part.velocityRange.max)"
+            groupedSamples[key, default: 0] += 1
+        }
+        
+        // If any group has more than 1 sample, we have round robins
+        return groupedSamples.values.contains { $0 > 1 }
+    }
+    
+    // MARK: - Audio Playback
+    
+    @MainActor
+    func playSamplePart(_ samplePart: MultiSamplePartData) {
+        guard let audioViewModel = audioViewModel,
+              let player = audioViewModel.audioPlayer,
+              let buffer = audioViewModel.sampleBuffer else {
+            print("Cannot play sample: missing audio components")
+            return
+        }
+        
+        // Calculate time boundaries
+        let sampleRate = player.format.sampleRate
+        let startTime = TimeInterval(samplePart.segmentStartSample) / sampleRate
+        let endTime = TimeInterval(samplePart.segmentEndSample) / sampleRate
+        let duration = endTime - startTime
+        
+        // Stop any current playback
+        player.stop()
+        player.currentTime = startTime
+        player.play()
+        audioViewModel.isPlaying = true
+        
+        // Use a timer to stop at the exact end time
+        Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { _ in
+            Task { @MainActor in
+                if player.isPlaying {
+                    player.stop()
+                    audioViewModel.isPlaying = false
+                }
+            }
+        }
     }
     
     // MARK: - Error Handling

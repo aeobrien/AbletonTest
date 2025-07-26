@@ -116,11 +116,46 @@ struct ContentView: View {
             }
             
             // Controls
-            WaveformControls(viewModel: audioViewModel)
-                .padding(.vertical, 8)
-                .background(Color.gray.opacity(0.05))
-                .cornerRadius(8)
+            VStack(spacing: 12) {
+                WaveformControls(viewModel: audioViewModel)
+                
+                // Group assignment controls
+                HStack {
+                    Toggle("Auto-assign groups", isOn: $audioViewModel.autoAssignGroups)
+                        .toggleStyle(.checkbox)
+                    
+                    Spacer()
+                    
+                    // Playback controls
+                    Button(action: {
+                        audioViewModel.playSelection()
+                    }) {
+                        Image(systemName: audioViewModel.isPlaying ? "pause.fill" : "play.fill")
+                    }
+                    .disabled(audioViewModel.sampleBuffer == nil)
+                    
+                    Button(action: {
+                        audioViewModel.stopPlayback()
+                    }) {
+                        Image(systemName: "stop.fill")
+                    }
+                    .disabled(!audioViewModel.isPlaying)
+                    
+                    if audioViewModel.tempSelection != nil {
+                        Button(action: {
+                            audioViewModel.clearSelection()
+                        }) {
+                            Text("Clear Selection")
+                                .font(.caption)
+                        }
+                    }
+                }
                 .padding(.horizontal)
+            }
+            .padding(.vertical, 8)
+            .background(Color.gray.opacity(0.05))
+            .cornerRadius(8)
+            .padding(.horizontal)
             
             // Action buttons
             HStack {
@@ -158,6 +193,9 @@ struct ContentView: View {
                     audioViewModel.importWAV(from: url)
                 }
             }
+        }
+        .popover(isPresented: $audioViewModel.showGroupAssignmentMenu) {
+            GroupAssignmentPopover(audioViewModel: audioViewModel)
         }
     }
     
@@ -357,6 +395,69 @@ struct VelocitySplitPromptView: View {
         }
         .padding()
         .frame(width: 400)
+    }
+}
+
+// MARK: - Group Assignment Popover
+
+struct GroupAssignmentPopover: View {
+    @ObservedObject var audioViewModel: EnhancedAudioViewModel
+    @State private var selectedGroup = 1
+    
+    var existingGroups: [Int] {
+        let groups = audioViewModel.markers.compactMap { $0.group }.sorted()
+        return groups.isEmpty ? [1] : Array(1...(groups.max()! + 1))
+    }
+    
+    var selectedMarkerCount: Int {
+        guard let range = audioViewModel.pendingGroupAssignment else { return 0 }
+        return audioViewModel.markers.filter { range.contains($0.samplePosition) }.count
+    }
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Assign \(selectedMarkerCount) marker\(selectedMarkerCount == 1 ? "" : "s") to group:")
+                .font(.headline)
+            
+            Picker("Group", selection: $selectedGroup) {
+                ForEach(existingGroups, id: \.self) { group in
+                    Text("Group \(group)").tag(group)
+                }
+            }
+            .pickerStyle(MenuPickerStyle())
+            .frame(width: 150)
+            
+            HStack(spacing: 20) {
+                Button("Assign to Group") {
+                    audioViewModel.assignToGroup(selectedGroup)
+                }
+                .buttonStyle(.borderedProminent)
+                
+                Button("Assign Incrementally") {
+                    audioViewModel.assignIncrementally()
+                }
+                .disabled(selectedMarkerCount < 2)
+                
+                Button("Unassign") {
+                    audioViewModel.unassignFromGroups()
+                }
+                .foregroundColor(.red)
+                
+                Button("Cancel") {
+                    audioViewModel.showGroupAssignmentMenu = false
+                    audioViewModel.pendingGroupAssignment = nil
+                    audioViewModel.tempSelection = nil
+                }
+            }
+            
+            if selectedMarkerCount > 1 {
+                Text("Incremental assignment will assign markers to groups 1, 2, 3...")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding()
+        .frame(minWidth: 400)
     }
 }
 

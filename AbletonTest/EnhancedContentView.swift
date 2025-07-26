@@ -20,6 +20,11 @@ final class EnhancedAudioViewModel: ObservableObject {
     @Published var scrollOffset: Double = 0.0
     @Published var yScale: Double = 1.0
     
+    // Group assignment controls
+    @Published var autoAssignGroups = true
+    @Published var showGroupAssignmentMenu = false
+    @Published var pendingGroupAssignment: ClosedRange<Int>? = nil
+    
     // Transient detection
     @Published var transientThreshold: Double = 0.3
     @Published var transientMarkers: Set<Int> = []
@@ -37,6 +42,10 @@ final class EnhancedAudioViewModel: ObservableObject {
     }
     
     var audioURL: URL?
+    var audioPlayer: AVAudioPlayer?  // Made public for SamplerViewModel access
+    @Published var isPlaying = false
+    @Published var playheadPosition: Double = 0.0 // Position in samples
+    private var playbackTimer: Timer?
     
     // MARK: Import WAV with AudioKit approach
     func importWAV(from url: URL) {
@@ -69,6 +78,9 @@ final class EnhancedAudioViewModel: ObservableObject {
                 // Reset view controls
                 zoomLevel = 1.0
                 scrollOffset = 0.0
+                
+                // Setup audio player
+                setupAudioPlayer(url: url)
                 
                 // Auto-scale Y axis based on peak amplitude
                 let maxAmplitude = samples.map { abs($0) }.max() ?? 1.0
@@ -146,11 +158,62 @@ final class EnhancedAudioViewModel: ObservableObject {
     
     func commitSelection() {
         guard let range = tempSelection else { return }
-        let newGroup = (markers.compactMap { $0.group }.max() ?? 0) + 1
-        for i in markers.indices where range.contains(markers[i].samplePosition) {
-            markers[i].group = newGroup
+        
+        if autoAssignGroups {
+            // Auto-assign to next available group
+            let newGroup = (markers.compactMap { $0.group }.max() ?? 0) + 1
+            for i in markers.indices where range.contains(markers[i].samplePosition) {
+                markers[i].group = newGroup
+            }
+            // Keep selection visible for playback
+            // tempSelection = nil  // Don't clear selection
+        } else {
+            // Store selection for manual assignment
+            pendingGroupAssignment = range
+            showGroupAssignmentMenu = true
         }
+    }
+    
+    func clearSelection() {
         tempSelection = nil
+        pendingGroupAssignment = nil
+    }
+    
+    func assignToGroup(_ groupNumber: Int) {
+        guard let range = pendingGroupAssignment else { return }
+        for i in markers.indices where range.contains(markers[i].samplePosition) {
+            markers[i].group = groupNumber
+        }
+        pendingGroupAssignment = nil
+        tempSelection = nil
+        showGroupAssignmentMenu = false
+    }
+    
+    func assignIncrementally() {
+        guard let range = pendingGroupAssignment else { return }
+        let selectedMarkers = markers.enumerated()
+            .filter { range.contains($0.element.samplePosition) }
+            .sorted { $0.element.samplePosition < $1.element.samplePosition }
+        
+        var currentGroup = 1
+        for (index, _) in selectedMarkers {
+            markers[index].group = currentGroup
+            currentGroup += 1
+        }
+        
+        pendingGroupAssignment = nil
+        tempSelection = nil
+        showGroupAssignmentMenu = false
+    }
+    
+    func unassignFromGroups() {
+        guard let range = pendingGroupAssignment else { return }
+        for i in markers.indices where range.contains(markers[i].samplePosition) {
+            markers[i].group = nil
+        }
+        pendingGroupAssignment = nil
+        tempSelection = nil
+        showGroupAssignmentMenu = false
     }
     
     // MARK: Zoom and scroll helpers
@@ -296,6 +359,88 @@ final class EnhancedAudioViewModel: ObservableObject {
             detectTransients()
         }
     }
+    
+    // MARK: Audio Playback
+    
+    private func setupAudioPlayer(url: URL) {
+        do {
+            audioPlayer = try AVAudioPlayer(contentsOf: url)
+            audioPlayer?.prepareToPlay()
+        } catch {
+            print("Failed to setup audio player: \(error)")
+        }
+    }
+    
+    func playSelection() {
+        guard let player = audioPlayer, let buffer = sampleBuffer else { return }
+        
+        if let selection = tempSelection ?? pendingGroupAssignment {
+            // Play selected region
+            let sampleRate = player.format.sampleRate
+            let startTime = TimeInterval(selection.lowerBound) / sampleRate
+            let endTime = TimeInterval(selection.upperBound) / sampleRate
+            let duration = endTime - startTime
+            
+            // Stop any current playback
+            player.stop()
+            player.currentTime = startTime
+            player.play()
+            isPlaying = true
+            
+            // Start playhead tracking
+            startPlayheadTracking()
+            
+            // Use a timer to stop at the exact end time
+            Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { _ in
+                if self.isPlaying {
+                    player.pause()
+                    self.isPlaying = false
+                    self.stopPlayheadTracking()
+                }
+            }
+        } else {
+            // Play entire file
+            togglePlayback()
+        }
+    }
+    
+    func togglePlayback() {
+        guard let player = audioPlayer else { return }
+        
+        if isPlaying {
+            player.pause()
+            isPlaying = false
+            stopPlayheadTracking()
+        } else {
+            player.play()
+            isPlaying = true
+            startPlayheadTracking()
+        }
+    }
+    
+    func stopPlayback() {
+        audioPlayer?.stop()
+        audioPlayer?.currentTime = 0
+        isPlaying = false
+        playheadPosition = 0
+        stopPlayheadTracking()
+    }
+    
+    private func startPlayheadTracking() {
+        stopPlayheadTracking() // Clear any existing timer
+        
+        playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { _ in
+            if let player = self.audioPlayer, let rate = self.sampleBuffer?.samples.count {
+                let sampleRate = player.format.sampleRate
+                self.playheadPosition = player.currentTime * sampleRate
+            }
+        }
+    }
+    
+    private func stopPlayheadTracking() {
+        playbackTimer?.invalidate()
+        playbackTimer = nil
+    }
 }
 
 // MARK: - Enhanced Waveform View with markers and selection
@@ -332,8 +477,19 @@ struct EnhancedWaveformView: View {
                                 .allowsHitTesting(false)
                             }
                             
-                            // Markers overlay
+                            // Markers and playhead overlay
                             Canvas { context, size in
+                                // Draw playhead if playing
+                                if viewModel.isPlaying {
+                                    let playheadX = viewModel.xPosition(for: Int(viewModel.playheadPosition), in: size.width)
+                                    if playheadX >= 0 && playheadX <= size.width {
+                                        var playheadPath = Path()
+                                        playheadPath.move(to: CGPoint(x: playheadX, y: 0))
+                                        playheadPath.addLine(to: CGPoint(x: playheadX, y: size.height))
+                                        context.stroke(playheadPath, with: .color(.orange), lineWidth: 2)
+                                    }
+                                }
+                                
                                 // Draw markers
                                 for marker in viewModel.markers {
                                     let x = viewModel.xPosition(for: marker.samplePosition, in: size.width)
@@ -451,7 +607,7 @@ struct EnhancedWaveformView: View {
                                                 // This was a single tap - do nothing (wait for double tap)
                                                 print("Single tap ignored @ \(value.location.x)")
                                             } else {
-                                                // End selection drag
+                                                // End selection drag - commit but don't clear immediately
                                                 print("Waveform drag end")
                                                 viewModel.commitSelection()
                                             }
@@ -469,6 +625,10 @@ struct EnhancedWaveformView: View {
 // MARK: - Minimap for navigation
 struct MinimapView: View {
     @ObservedObject var viewModel: EnhancedAudioViewModel
+    @State private var isDraggingLeft = false
+    @State private var isDraggingRight = false
+    @State private var dragStartZoom: Double = 1.0
+    @State private var dragStartOffset: Double = 0.0
     
     var body: some View {
         GeometryReader { geometry in
@@ -493,12 +653,59 @@ struct MinimapView: View {
                                             + indicatorWidth / 2                 // move to the bar’s centre
                                             - width / 2                          // shift because the ZStack is centred
                         
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Color.blue.opacity(0.3))
-                            .stroke(Color.blue, lineWidth: 1)
-                            .frame(width: indicatorWidth, height: geometry.size.height)
-                            .offset(x: indicatorOffset)
-                            .allowsHitTesting(false)
+                        // Zoom indicator with edge handles
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color.blue.opacity(0.3))
+                                .stroke(Color.blue, lineWidth: 1)
+                                .frame(width: indicatorWidth, height: geometry.size.height)
+                            
+                            // Left edge handle
+                            Rectangle()
+                                .fill(Color.blue.opacity(0.001))  // Nearly invisible but still interactive
+                                .frame(width: 20, height: geometry.size.height)  // Wider for easier grabbing
+                                .contentShape(Rectangle())
+                                .offset(x: -indicatorWidth/2 + 10)
+                                .cursor(NSCursor.resizeLeftRight)
+                                .highPriorityGesture(
+                                    DragGesture(minimumDistance: 1)
+                                        .onChanged { value in
+                                            if !isDraggingLeft {
+                                                isDraggingLeft = true
+                                                dragStartZoom = viewModel.zoomLevel
+                                                dragStartOffset = viewModel.scrollOffset
+                                            }
+                                            handleLeftEdgeDrag(value: value, width: width, indicatorWidth: indicatorWidth)
+                                        }
+                                        .onEnded { _ in
+                                            isDraggingLeft = false
+                                        }
+                                )
+                            
+                            // Right edge handle
+                            Rectangle()
+                                .fill(Color.blue.opacity(0.001))  // Nearly invisible but still interactive
+                                .frame(width: 20, height: geometry.size.height)  // Wider for easier grabbing
+                                .contentShape(Rectangle())
+                                .offset(x: indicatorWidth/2 - 10)
+                                .cursor(NSCursor.resizeLeftRight)
+                                .highPriorityGesture(
+                                    DragGesture(minimumDistance: 1)
+                                        .onChanged { value in
+                                            if !isDraggingRight {
+                                                isDraggingRight = true
+                                                dragStartZoom = viewModel.zoomLevel
+                                                dragStartOffset = viewModel.scrollOffset
+                                            }
+                                            handleRightEdgeDrag(value: value, width: width, indicatorWidth: indicatorWidth)
+                                        }
+                                        .onEnded { _ in
+                                            isDraggingRight = false
+                                        }
+                                )
+                        }
+                        .frame(width: indicatorWidth, height: geometry.size.height)
+                        .offset(x: indicatorOffset)
                     }
                     .cornerRadius(8)
                     .overlay(
@@ -507,35 +714,87 @@ struct MinimapView: View {
                     )
                 )
                 .contentShape(Rectangle())
-                .highPriorityGesture( // <- make sure we win the arena
-                    DragGesture(minimumDistance: 0)
+                .onTapGesture { location in
+                    // Only handle taps outside the indicator
+                    let indicatorWidth = width / CGFloat(viewModel.zoomLevel)
+                    let indicatorStart = CGFloat(viewModel.scrollOffset) * width
+                    let indicatorEnd = indicatorStart + indicatorWidth
+                    
+                    if location.x < indicatorStart || location.x > indicatorEnd {
+                        // Tap is outside indicator, jump to position
+                        guard viewModel.zoomLevel > 1.0 else { return }
+                        
+                        // Center the indicator at the tap position
+                        let targetOffset = (location.x - indicatorWidth / 2) / (width - indicatorWidth)
+                        let maxScrollOffset = 1.0 - (1.0 / viewModel.zoomLevel)
+                        viewModel.scrollOffset = max(0, min(maxScrollOffset, Double(targetOffset)))
+                    }
+                }
+                .gesture(
+                    DragGesture(minimumDistance: 5)
                         .onChanged { value in
-                            print("Minimap drag changed @ \(value.location.x)")
-                            guard viewModel.zoomLevel > 1.0 else { return }
+                            // Only handle drag on the indicator itself, not edges
+                            guard !isDraggingLeft && !isDraggingRight else { return }
                             
                             let indicatorWidth = width / CGFloat(viewModel.zoomLevel)
-                            // Center the indicator at the mouse position
-                            let targetOffset = (value.location.x - indicatorWidth / 2) / (width - indicatorWidth)
-                            let maxScrollOffset = 1.0 - (1.0 / viewModel.zoomLevel)
-                            viewModel.scrollOffset = max(0, min(maxScrollOffset, Double(targetOffset)))
-                        }
-                        .onEnded { value in
-                            if abs(value.translation.width) < 5 && abs(value.translation.height) < 5 {
-                                print("Minimap tapped @ \(value.location.x)")
+                            let indicatorStart = CGFloat(viewModel.scrollOffset) * width
+                            let indicatorEnd = indicatorStart + indicatorWidth
+                            
+                            // Check if drag started within the indicator (but not on edges)
+                            let startX = value.startLocation.x
+                            let edgeThreshold: CGFloat = 15
+                            
+                            if startX >= indicatorStart + edgeThreshold && 
+                               startX <= indicatorEnd - edgeThreshold {
+                                // Drag the indicator
                                 guard viewModel.zoomLevel > 1.0 else { return }
                                 
-                                let indicatorWidth = width / CGFloat(viewModel.zoomLevel)
-                                // Center the indicator at the mouse position
-                                let targetOffset = (value.location.x - indicatorWidth / 2) / (width - indicatorWidth)
+                                let dragDelta = value.translation.width / width
+                                let newOffset = viewModel.scrollOffset + Double(dragDelta) / viewModel.zoomLevel
                                 let maxScrollOffset = 1.0 - (1.0 / viewModel.zoomLevel)
-                                viewModel.scrollOffset = max(0, min(maxScrollOffset, Double(targetOffset)))
-                            } else {
-                                print("Minimap dragged end")
+                                viewModel.scrollOffset = max(0, min(maxScrollOffset, newOffset))
                             }
                         }
                 )
         }
         .frame(height: 60)
+    }
+    
+    private func handleLeftEdgeDrag(value: DragGesture.Value, width: CGFloat, indicatorWidth: CGFloat) {
+        let delta = value.translation.width / width
+        let newIndicatorWidth = max(20, indicatorWidth - value.translation.width)
+        let newZoom = width / newIndicatorWidth
+        
+        if newZoom >= 1.0 && newZoom <= 500.0 {
+            viewModel.zoomLevel = newZoom
+            // Adjust scroll to keep right edge fixed
+            let rightEdge = dragStartOffset + 1.0 / dragStartZoom
+            viewModel.scrollOffset = max(0, min(1 - 1/newZoom, rightEdge - 1.0 / newZoom))
+        }
+    }
+    
+    private func handleRightEdgeDrag(value: DragGesture.Value, width: CGFloat, indicatorWidth: CGFloat) {
+        let newIndicatorWidth = max(20, indicatorWidth + value.translation.width)
+        let newZoom = width / newIndicatorWidth
+        
+        if newZoom >= 1.0 && newZoom <= 500.0 {
+            viewModel.zoomLevel = newZoom
+            // Keep left edge fixed
+            viewModel.scrollOffset = max(0, min(1 - 1/newZoom, dragStartOffset))
+        }
+    }
+}
+
+// MARK: - Cursor Extension
+extension View {
+    func cursor(_ cursor: NSCursor) -> some View {
+        self.onHover { hovering in
+            if hovering {
+                cursor.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
     }
 }
 

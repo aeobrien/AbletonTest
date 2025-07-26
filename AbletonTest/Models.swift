@@ -60,8 +60,8 @@ struct MultiSamplePartData: Identifiable, Hashable {
     
     let id = UUID()
     var name: String
-    let keyRangeMin: Int // MIDI note number
-    let keyRangeMax: Int // MIDI note number (same as min for single key mapping)
+    var keyRangeMin: Int // MIDI note number
+    var keyRangeMax: Int // MIDI note number (same as min for single key mapping)
     var velocityRange: VelocityRangeData
     let sourceFileURL: URL // Original URL of the audio file containing the segment
     var segmentStartSample: Int64 // Start frame within the source file
@@ -79,13 +79,21 @@ struct MultiSamplePartData: Identifiable, Hashable {
     var lastModDate: Date?
     var originalFileFrameCount: Int64?
     
+    // Pitched mode properties
+    var isPitched: Bool = false  // When true, sample is pitched across key range
+    var originalRootKey: Int?    // The original pitch of the sample (for pitched mode)
+    
     // Calculated Segment Properties
     var segmentFrameCount: Int64 {
         max(0, segmentEndSample - segmentStartSample)
     }
     
     // Default values for XML fields
-    var rootKey: Int { keyRangeMin }
+    var rootKey: Int { 
+        // If pitched mode and original root key is set, use that
+        // Otherwise use keyRangeMin (non-pitched behavior)
+        originalRootKey ?? keyRangeMin 
+    }
     var detune: Int = 0
     var tuneScale: Int = 100
     var panorama: Int = 0
