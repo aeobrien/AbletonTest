@@ -91,27 +91,29 @@ struct ContentView: View {
                         GeometryReader { geometry in
                             if audioViewModel.isInspectingTransients {
                                 // In inspection mode, only show current region handles
-                                let sortedTransients = Array(audioViewModel.transientMarkers).sorted()
-                                if audioViewModel.currentTransientIndex >= 0 && audioViewModel.currentTransientIndex < sortedTransients.count {
-                                    let transientPosition = sortedTransients[audioViewModel.currentTransientIndex]
+                                // Get all transient markers (those without groups) sorted by position
+                                let transientMarkerIndices = audioViewModel.markers.enumerated()
+                                    .filter { $0.element.group == nil }
+                                    .sorted { $0.element.samplePosition < $1.element.samplePosition }
+                                    .map { $0.offset }
+                                
+                                if audioViewModel.currentTransientIndex >= 0 && audioViewModel.currentTransientIndex < transientMarkerIndices.count {
+                                    let markerIndex = transientMarkerIndices[audioViewModel.currentTransientIndex]
                                     
-                                    // Find the marker for this transient
-                                    if let markerIndex = audioViewModel.markers.firstIndex(where: { $0.samplePosition == transientPosition }) {
-                                        MarkerHandle(
-                                            marker: audioViewModel.markers[markerIndex],
-                                            markerIndex: markerIndex,
-                                            geometry: geometry,
-                                            audioViewModel: audioViewModel
-                                        )
-                                        
-                                        // End handle for the current region
-                                        RegionEndHandle(
-                                            marker: audioViewModel.markers[markerIndex],
-                                            markerIndex: markerIndex,
-                                            geometry: geometry,
-                                            audioViewModel: audioViewModel
-                                        )
-                                    }
+                                    MarkerHandle(
+                                        marker: audioViewModel.markers[markerIndex],
+                                        markerIndex: markerIndex,
+                                        geometry: geometry,
+                                        audioViewModel: audioViewModel
+                                    )
+                                    
+                                    // End handle for the current region
+                                    RegionEndHandle(
+                                        marker: audioViewModel.markers[markerIndex],
+                                        markerIndex: markerIndex,
+                                        geometry: geometry,
+                                        audioViewModel: audioViewModel
+                                    )
                                 }
                             } else {
                                 // Normal mode - show all handles
@@ -134,24 +136,27 @@ struct ContentView: View {
                         GeometryReader { geometry in
                             if audioViewModel.isInspectingTransients {
                                 // In inspection mode, only show play button for current region
-                                let sortedTransients = Array(audioViewModel.transientMarkers).sorted()
-                                if audioViewModel.currentTransientIndex >= 0 && audioViewModel.currentTransientIndex < sortedTransients.count {
-                                    let transientPosition = sortedTransients[audioViewModel.currentTransientIndex]
+                                // Get all transient markers (those without groups) sorted by position
+                                let transientMarkerIndices = audioViewModel.markers.enumerated()
+                                    .filter { $0.element.group == nil }
+                                    .sorted { $0.element.samplePosition < $1.element.samplePosition }
+                                    .map { $0.offset }
+                                
+                                if audioViewModel.currentTransientIndex >= 0 && audioViewModel.currentTransientIndex < transientMarkerIndices.count {
+                                    let markerIndex = transientMarkerIndices[audioViewModel.currentTransientIndex]
+                                    let marker = audioViewModel.markers[markerIndex]
+                                    let x = audioViewModel.xPosition(for: marker.samplePosition, in: geometry.size.width)
                                     
-                                    if let marker = audioViewModel.markers.first(where: { $0.samplePosition == transientPosition }) {
-                                        let x = audioViewModel.xPosition(for: marker.samplePosition, in: geometry.size.width)
-                                        
-                                        if x >= 0 && x <= geometry.size.width {
-                                            Button(action: {
-                                                audioViewModel.playMarkerRegion(marker: marker)
-                                            }) {
-                                                Image(systemName: "play.circle.fill")
-                                                    .font(.system(size: 16))
-                                                    .foregroundColor(.purple)
-                                            }
-                                            .buttonStyle(.plain)
-                                            .position(x: x, y: 6)
+                                    if x >= 0 && x <= geometry.size.width {
+                                        Button(action: {
+                                            audioViewModel.playMarkerRegion(marker: marker)
+                                        }) {
+                                            Image(systemName: "play.circle.fill")
+                                                .font(.system(size: 16))
+                                                .foregroundColor(.purple)
                                         }
+                                        .buttonStyle(.plain)
+                                        .position(x: x, y: 6)
                                     }
                                 }
                             } else {
@@ -329,6 +334,20 @@ struct ContentView: View {
                                         Image(systemName: "chevron.right")
                                     }
                                     
+                                    // Merge with next button
+                                    if audioViewModel.currentTransientIndex < audioViewModel.transientMarkers.count - 1 {
+                                        Divider()
+                                            .frame(height: 20)
+                                        
+                                        Button(action: {
+                                            audioViewModel.mergeWithNextRegion()
+                                        }) {
+                                            Label("Merge", systemImage: "arrow.merge")
+                                                .font(.caption)
+                                        }
+                                        .buttonStyle(.bordered)
+                                    }
+                                    
                                     Button(action: {
                                         audioViewModel.stopTransientInspection()
                                     }) {
@@ -458,8 +477,8 @@ struct ContentView: View {
                         panel.allowedContentTypes = [.wav]
                         panel.begin { response in
                             if response == .OK {
-                                batchImportURLs = panel.urls
-                                showingBatchImport = true
+                                self.batchImportURLs = panel.urls
+                                self.showingBatchImport = true
                             }
                         }
                     }) {
@@ -467,7 +486,7 @@ struct ContentView: View {
                     }
                     
                     Button(action: {
-                        showingGroupMapper = true
+                        self.showingGroupMapper = true
                     }) {
                         Label("Map Groups to Velocity Layers...", systemImage: "rectangle.3.group")
                     }
@@ -732,6 +751,15 @@ struct MarkerHandle: View {
                                 isDragging = true
                                 dragStartPosition = x
                                 dragStartSamplePosition = marker.samplePosition
+                                print("Marker drag start - markerIndex: \(markerIndex), x: \(x), samplePos: \(marker.samplePosition)")
+                                // Auto-zoom if in inspect mode
+                                if audioViewModel.isInspectingTransients {
+                                    audioViewModel.startTransientDragInInspectMode(marker: marker)
+                                    // Recalculate dragStartPosition after zoom
+                                    let oldDragStart = dragStartPosition
+                                    dragStartPosition = audioViewModel.xPosition(for: marker.samplePosition, in: geometry.size.width)
+                                    print("Recalculated dragStartPosition after zoom: \(oldDragStart) -> \(dragStartPosition)")
+                                }
                             }
                             let newX = dragStartPosition + value.translation.width
                             audioViewModel.moveMarker(at: markerIndex, toX: newX, width: geometry.size.width)
@@ -740,10 +768,14 @@ struct MarkerHandle: View {
                             isDragging = false
                             dragStartPosition = 0
                             dragStartSamplePosition = 0
+                            // Return to normal inspect zoom
+                            if audioViewModel.isInspectingTransients {
+                                audioViewModel.endTransientDragInInspectMode()
+                            }
                         }
                 )
                 .simultaneousGesture(
-                    TapGesture(count: 2).onEnded {
+                    TapGesture().modifiers(.command).onEnded {
                         audioViewModel.deleteMarker(at: markerIndex)
                     }
                 )
@@ -797,18 +829,25 @@ struct RegionEndHandle: View {
                                 isDragging = true
                                 dragStartPosition = x
                                 dragStartEndPosition = endPosition
+                                print("=== REGION END DRAG START ===")
+                                print("Start position (x): \(x)")
+                                print("Start end position (samples): \(endPosition)")
+                                print("Geometry width: \(geometry.size.width)")
                             }
                             let newX = dragStartPosition + value.translation.width
+                            print("Translation: \(value.translation.width), New X: \(newX)")
                             audioViewModel.moveMarkerEndPosition(at: markerIndex, toX: newX, width: geometry.size.width)
                         }
-                        .onEnded { _ in
+                        .onEnded { value in
+                            print("=== REGION END DRAG END ===")
+                            print("Final translation: \(value.translation)")
                             isDragging = false
                             dragStartPosition = 0
                             dragStartEndPosition = 0
                         }
                 )
                 .simultaneousGesture(
-                    TapGesture(count: 2).onEnded {
+                    TapGesture().modifiers(.command).onEnded {
                         audioViewModel.resetMarkerEndPosition(at: markerIndex)
                     }
                 )

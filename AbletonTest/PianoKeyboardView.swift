@@ -306,6 +306,9 @@ struct VelocityLayerRow: View {
                             rrIndex: rrIndex,
                             onDrop: { url in
                                 handleSampleDrop(url: url, rrIndex: rrIndex)
+                            },
+                            onRemove: {
+                                removeSample(at: rrIndex)
                             }
                         )
                     }
@@ -366,6 +369,18 @@ struct VelocityLayerRow: View {
     private func addRoundRobinSlot() {
         layer.samples.append(nil)
     }
+    
+    private func removeSample(at index: Int) {
+        guard index >= 0 && index < layer.samples.count else { return }
+        
+        if let sample = layer.samples[index] {
+            // Remove from multiSampleParts
+            viewModel.multiSampleParts.removeAll { $0.id == sample.id }
+        }
+        
+        // Remove from layer
+        layer.samples.remove(at: index)
+    }
 }
 
 // MARK: - Round Robin Slot
@@ -374,36 +389,42 @@ struct RoundRobinSlot: View {
     let sample: MultiSamplePartData?
     let rrIndex: Int
     let onDrop: (URL) -> Void
+    let onRemove: () -> Void
     
     @State private var isTargeted = false
-    @State private var isPlaying = false
     @EnvironmentObject var samplerViewModel: SamplerViewModel
     
     var body: some View {
         VStack(spacing: 4) {
             if let sample = sample {
-                VStack(spacing: 2) {
-                    Image(systemName: isPlaying ? "waveform.circle.fill" : "waveform")
-                        .font(.title3)
-                        .foregroundColor(isPlaying ? .white : .primary)
-                    Text(sample.name)
-                        .font(.caption2)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .foregroundColor(isPlaying ? .white : .primary)
-                }
-                .frame(width: 80, height: 60)
-                .background(isPlaying ? Color.blue : Color.green.opacity(0.3))
-                .cornerRadius(8)
-                .onTapGesture {
-                    isPlaying = true
-                    samplerViewModel.playSamplePart(sample)
-                    
-                    // Reset visual state after expected duration
-                    let duration = Double(sample.segmentEndSample - sample.segmentStartSample) / (sample.sampleRate ?? 44100.0)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
-                        isPlaying = false
+                let isPlaying = samplerViewModel.currentlyPlayingSampleId == sample.id
+                
+                ZStack(alignment: .topTrailing) {
+                    VStack(spacing: 2) {
+                        Image(systemName: isPlaying ? "waveform.circle.fill" : "waveform")
+                            .font(.title3)
+                            .foregroundColor(isPlaying ? .white : .primary)
+                        Text(sample.name)
+                            .font(.caption2)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .foregroundColor(isPlaying ? .white : .primary)
                     }
+                    .frame(width: 80, height: 60)
+                    .background(isPlaying ? Color.blue : Color.green.opacity(0.3))
+                    .cornerRadius(8)
+                    .onTapGesture {
+                        samplerViewModel.playSamplePart(sample)
+                    }
+                    
+                    // X button to remove
+                    Button(action: onRemove) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.caption)
+                            .foregroundColor(.red)
+                            .background(Circle().fill(Color.white))
+                    }
+                    .offset(x: 5, y: -5)
                 }
             } else {
                 VStack(spacing: 2) {

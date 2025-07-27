@@ -484,6 +484,7 @@ class SamplerViewModel: ObservableObject {
                 </VolumeAndPan>
                 <Globals>
                     <NumVoices Value="32" />
+                    <Retrigger Value="false" />
                 </Globals>
             </MultiSampler>
         </Ableton>
@@ -573,6 +574,9 @@ class SamplerViewModel: ObservableObject {
     
     // MARK: - Audio Playback
     
+    private var playbackTimer: Timer?
+    @Published var currentlyPlayingSampleId: UUID? = nil
+    
     @MainActor
     func playSamplePart(_ samplePart: MultiSamplePartData) {
         guard let audioViewModel = audioViewModel,
@@ -582,24 +586,46 @@ class SamplerViewModel: ObservableObject {
             return
         }
         
+        // Cancel any existing playback timer (monophonic behavior)
+        playbackTimer?.invalidate()
+        
+        // If a sample is already playing, apply fade out to prevent click
+        if currentlyPlayingSampleId != nil && player.isPlaying {
+            // Apply 10ms fade out
+            let fadeOutDuration = 0.01 // 10ms
+            player.setVolume(0.0, fadeDuration: fadeOutDuration)
+            
+            // Stop after fade completes
+            DispatchQueue.main.asyncAfter(deadline: .now() + fadeOutDuration) {
+                player.stop()
+                player.setVolume(1.0, fadeDuration: 0) // Reset volume
+            }
+        }
+        
+        // Set currently playing sample
+        currentlyPlayingSampleId = samplePart.id
+        
         // Calculate time boundaries
         let sampleRate = player.format.sampleRate
         let startTime = TimeInterval(samplePart.segmentStartSample) / sampleRate
         let endTime = TimeInterval(samplePart.segmentEndSample) / sampleRate
         let duration = endTime - startTime
         
-        // Stop any current playback
-        player.stop()
-        player.currentTime = startTime
-        player.play()
-        audioViewModel.isPlaying = true
+        // Start playback after any fade out completes
+        let playbackDelay = player.isPlaying ? 0.01 : 0.0
+        DispatchQueue.main.asyncAfter(deadline: .now() + playbackDelay) {
+            player.currentTime = startTime
+            player.play()
+            audioViewModel.isPlaying = true
+        }
         
         // Use a timer to stop at the exact end time
-        Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { _ in
+        playbackTimer = Timer.scheduledTimer(withTimeInterval: duration + playbackDelay, repeats: false) { _ in
             Task { @MainActor in
-                if player.isPlaying {
+                if player.isPlaying && self.currentlyPlayingSampleId == samplePart.id {
                     player.stop()
                     audioViewModel.isPlaying = false
+                    self.currentlyPlayingSampleId = nil
                 }
             }
         }
