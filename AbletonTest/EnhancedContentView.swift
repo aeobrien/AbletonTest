@@ -805,6 +805,40 @@ struct EnhancedWaveformView: View {
                                 .fill(Color.clear)
                                 .frame(width: geometry.size.width, height: geometry.size.height)
                                 .contentShape(Rectangle())
+                                .highPriorityGesture(
+                                    DragGesture(minimumDistance: 0)
+                                        .onChanged { value in
+                                            if viewModel.draggingMarkerIndex == nil {
+                                                // Check if we're near a transient marker handle (at the top)
+                                                if value.startLocation.y < 20 {
+                                                    viewModel.draggingMarkerIndex = viewModel.findMarkerNearPosition(
+                                                        x: value.startLocation.x,
+                                                        width: geometry.size.width,
+                                                        tolerance: 10
+                                                    )
+                                                }
+                                            }
+                                            if let dragIndex = viewModel.draggingMarkerIndex {
+                                                viewModel.moveMarker(at: dragIndex, toX: value.location.x, width: geometry.size.width)
+                                            } else {
+                                                viewModel.updateTempSelection(
+                                                    startX: value.startLocation.x,
+                                                    currentX: value.location.x,
+                                                    width: geometry.size.width
+                                                )
+                                            }
+                                        }
+                                        .onEnded { value in
+                                            if viewModel.draggingMarkerIndex != nil {
+                                                viewModel.draggingMarkerIndex = nil
+                                            } else if abs(value.translation.width) < 5 && abs(value.translation.height) < 5 {
+                                                // This was effectively a tap, not a drag
+                                                // Don't commit selection for taps
+                                            } else {
+                                                viewModel.commitSelection()
+                                            }
+                                        }
+                                )
                                 .onTapGesture(count: 2) { location in
                                     print("Double tap @ \(location.x)")
                                     // Check if we're near an existing marker
@@ -820,49 +854,6 @@ struct EnhancedWaveformView: View {
                                         viewModel.addMarker(atX: location.x, inWidth: geometry.size.width)
                                     }
                                 }
-                                .gesture(
-                                    DragGesture(minimumDistance: 0)
-                                        .onChanged { value in
-                                            // Check if we started dragging near a marker handle
-                                            if viewModel.draggingMarkerIndex == nil && value.translation.width == 0 && value.translation.height == 0 {
-                                                // Check if we're near a transient marker handle (at the top)
-                                                if value.startLocation.y < 20 {
-                                                    viewModel.draggingMarkerIndex = viewModel.findMarkerNearPosition(
-                                                        x: value.startLocation.x,
-                                                        width: geometry.size.width,
-                                                        tolerance: 10
-                                                    )
-                                                }
-                                            }
-                                            
-                                            if let dragIndex = viewModel.draggingMarkerIndex {
-                                                // We're dragging a marker
-                                                viewModel.moveMarker(at: dragIndex, toX: value.location.x, width: geometry.size.width)
-                                            } else {
-                                                // Normal selection drag
-                                                print("Waveform drag changed @ \(value.location.x)")
-                                                viewModel.updateTempSelection(
-                                                    startX: value.startLocation.x,
-                                                    currentX: value.location.x,
-                                                    width: geometry.size.width
-                                                )
-                                            }
-                                        }
-                                        .onEnded { value in
-                                            if let _ = viewModel.draggingMarkerIndex {
-                                                // End marker dragging
-                                                viewModel.draggingMarkerIndex = nil
-                                                print("Marker drag ended")
-                                            } else if abs(value.translation.width) < 5 && abs(value.translation.height) < 5 {
-                                                // This was a single tap - do nothing (wait for double tap)
-                                                print("Single tap ignored @ \(value.location.x)")
-                                            } else {
-                                                // End selection drag - commit but don't clear immediately
-                                                print("Waveform drag end")
-                                                viewModel.commitSelection()
-                                            }
-                                        }
-                                )
                         }
                     }
                 )
@@ -970,6 +961,8 @@ struct MinimapView: View {
     @State private var dragStartOffset: Double = 0.0
     @State private var dragStartIndicatorOffset: Double = -1.0
     @State private var dragStartIndicatorWidth: CGFloat = 0
+    @State private var dragStartLeftPx: CGFloat = 0
+    @State private var dragStartRightPx: CGFloat = 0
     
     var body: some View {
         GeometryReader { geometry in
@@ -1036,15 +1029,26 @@ struct MinimapView: View {
                                 .offset(x: -indicatorWidth/2 + edgeZoneWidth/2)
                                 .cursor(NSCursor.resizeLeftRight)
                                 .highPriorityGesture(
-                                    DragGesture(minimumDistance: 1)
+                                    DragGesture(minimumDistance: 1, coordinateSpace: .named("minimap"))
                                         .onChanged { value in
                                             if !isDraggingLeft {
                                                 isDraggingLeft = true
                                                 dragStartZoom = viewModel.zoomLevel
                                                 dragStartOffset = viewModel.scrollOffset
-                                                dragStartIndicatorWidth = indicatorWidth
+                                                dragStartIndicatorWidth = width / CGFloat(viewModel.zoomLevel)
+                                                dragStartLeftPx = CGFloat(dragStartOffset) * width
+                                                dragStartRightPx = dragStartLeftPx + dragStartIndicatorWidth
                                             }
-                                            handleLeftEdgeDrag(value: value, width: width)
+                                            let minWidth: CGFloat = 20
+                                            let newLeftPx = min(max(0, value.location.x), dragStartRightPx - minWidth)
+                                            let newWidth = dragStartRightPx - newLeftPx
+                                            let newZoom = width / newWidth
+
+                                            if newZoom >= 1, newZoom <= 500 {
+                                                viewModel.zoomLevel = newZoom
+                                                let maxOff = 1.0 - 1.0 / newZoom
+                                                viewModel.scrollOffset = max(0, min(maxOff, Double(newLeftPx / width)))
+                                            }
                                         }
                                         .onEnded { _ in
                                             isDraggingLeft = false
@@ -1059,15 +1063,27 @@ struct MinimapView: View {
                                 .offset(x: indicatorWidth/2 - edgeZoneWidth/2)
                                 .cursor(NSCursor.resizeLeftRight)
                                 .highPriorityGesture(
-                                    DragGesture(minimumDistance: 1)
+                                    DragGesture(minimumDistance: 1, coordinateSpace: .named("minimap"))
                                         .onChanged { value in
                                             if !isDraggingRight {
                                                 isDraggingRight = true
                                                 dragStartZoom = viewModel.zoomLevel
                                                 dragStartOffset = viewModel.scrollOffset
-                                                dragStartIndicatorWidth = indicatorWidth
+                                                dragStartIndicatorWidth = width / CGFloat(viewModel.zoomLevel)
+                                                dragStartLeftPx = CGFloat(dragStartOffset) * width
+                                                dragStartRightPx = dragStartLeftPx + dragStartIndicatorWidth
                                             }
-                                            handleRightEdgeDrag(value: value, width: width)
+                                            let minWidth: CGFloat = 20
+                                            let newRightPx = max(min(width, value.location.x), dragStartLeftPx + minWidth)
+                                            let newWidth = newRightPx - dragStartLeftPx
+                                            let newZoom = width / newWidth
+
+                                            if newZoom >= 1, newZoom <= 500 {
+                                                viewModel.zoomLevel = newZoom
+                                                // Left edge fixed in pixels → offset stays proportional to left edge
+                                                let maxOff = 1.0 - 1.0 / newZoom
+                                                viewModel.scrollOffset = max(0, min(maxOff, Double(dragStartLeftPx / width)))
+                                            }
                                         }
                                         .onEnded { _ in
                                             isDraggingRight = false
@@ -1076,6 +1092,30 @@ struct MinimapView: View {
                         }
                         .frame(width: indicatorWidth, height: geometry.size.height)
                         .offset(x: indicatorOffset)
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { value in
+                                    // Only handle drag on the indicator itself, not edges
+                                    guard !isDraggingLeft && !isDraggingRight else { return }
+                                    guard viewModel.zoomLevel > 1.0 else { return }
+                                    
+                                    // Initialize on first drag
+                                    if !isDraggingIndicator {
+                                        isDraggingIndicator = true
+                                        dragStartIndicatorOffset = viewModel.scrollOffset
+                                    }
+                                    
+                                    // Apply drag movement
+                                    let dragDelta = value.translation.width / width
+                                    let newOffset = dragStartIndicatorOffset + Double(dragDelta)
+                                    let maxScrollOffset = 1.0 - (1.0 / viewModel.zoomLevel)
+                                    viewModel.scrollOffset = max(0, min(maxScrollOffset, newOffset))
+                                }
+                                .onEnded { _ in
+                                    dragStartIndicatorOffset = -1
+                                    isDraggingIndicator = false
+                                }
+                        )
                     }
                     .cornerRadius(8)
                     .overlay(
@@ -1083,7 +1123,14 @@ struct MinimapView: View {
                             .stroke(Color.gray.opacity(0.3), lineWidth: 1)
                     )
                 )
+                .coordinateSpace(name: "minimap")
                 .contentShape(Rectangle())
+                .simultaneousGesture(
+                    TapGesture().onEnded {
+                        // We need to calculate the location separately
+                        // This won't give us the exact location, so we'll need a different approach
+                    }
+                )
                 .onTapGesture { location in
                     // Only handle taps outside the indicator
                     let indicatorWidth = width / CGFloat(viewModel.zoomLevel)
@@ -1100,55 +1147,8 @@ struct MinimapView: View {
                         viewModel.scrollOffset = max(0, min(maxScrollOffset, Double(targetOffset)))
                     }
                 }
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            // Only handle drag on the indicator itself, not edges
-                            guard !isDraggingLeft && !isDraggingRight else { return }
-                            guard viewModel.zoomLevel > 1.0 else { return }
-                            
-                            // Initialize on first drag
-                            if !isDraggingIndicator {
-                                isDraggingIndicator = true
-                                dragStartIndicatorOffset = viewModel.scrollOffset
-                            }
-                            
-                            // Apply drag movement
-                            let dragDelta = value.translation.width / width
-                            let newOffset = dragStartIndicatorOffset + Double(dragDelta)
-                            let maxScrollOffset = 1.0 - (1.0 / viewModel.zoomLevel)
-                            viewModel.scrollOffset = max(0, min(maxScrollOffset, newOffset))
-                        }
-                        .onEnded { _ in
-                            dragStartIndicatorOffset = -1
-                            isDraggingIndicator = false
-                        }
-                )
         }
         .frame(height: 60)
-    }
-    
-    private func handleLeftEdgeDrag(value: DragGesture.Value, width: CGFloat) {
-        let newIndicatorWidth = max(20, dragStartIndicatorWidth - value.translation.width)
-        let newZoom = width / newIndicatorWidth
-        
-        if newZoom >= 1.0 && newZoom <= 500.0 {
-            viewModel.zoomLevel = newZoom
-            // Adjust scroll to keep right edge fixed
-            let rightEdge = dragStartOffset + 1.0 / dragStartZoom
-            viewModel.scrollOffset = max(0, min(1 - 1/newZoom, rightEdge - 1.0 / newZoom))
-        }
-    }
-    
-    private func handleRightEdgeDrag(value: DragGesture.Value, width: CGFloat) {
-        let newIndicatorWidth = max(20, dragStartIndicatorWidth + value.translation.width)
-        let newZoom = width / newIndicatorWidth
-        
-        if newZoom >= 1.0 && newZoom <= 500.0 {
-            viewModel.zoomLevel = newZoom
-            // Keep left edge fixed
-            viewModel.scrollOffset = max(0, min(1 - 1/newZoom, dragStartOffset))
-        }
     }
 }
 

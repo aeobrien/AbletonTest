@@ -279,6 +279,7 @@ struct ContentView: View {
                         
                         HStack(spacing: 8) {
                             Button(action: {
+                                print("Detect button pressed")
                                 audioViewModel.detectTransients()
                             }) {
                                 Label("Detect", systemImage: "waveform.badge.plus")
@@ -724,29 +725,27 @@ struct MarkerHandle: View {
                         .stroke(Color.white, lineWidth: 1)
                 )
                 .position(x: x, y: 6)
-                .onTapGesture(count: 2) {
-                    // Double-click to delete marker
-                    audioViewModel.deleteMarker(at: markerIndex)
-                }
-                .gesture(
+                .highPriorityGesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { value in
-                            // Store initial position on first drag
                             if !isDragging {
                                 isDragging = true
                                 dragStartPosition = x
                                 dragStartSamplePosition = marker.samplePosition
                             }
-                            // Calculate new position based on drag start
                             let newX = dragStartPosition + value.translation.width
                             audioViewModel.moveMarker(at: markerIndex, toX: newX, width: geometry.size.width)
                         }
                         .onEnded { _ in
-                            // Reset for next drag
                             isDragging = false
                             dragStartPosition = 0
                             dragStartSamplePosition = 0
                         }
+                )
+                .simultaneousGesture(
+                    TapGesture(count: 2).onEnded {
+                        audioViewModel.deleteMarker(at: markerIndex)
+                    }
                 )
         }
     }
@@ -791,29 +790,27 @@ struct RegionEndHandle: View {
                         .stroke(Color.white, lineWidth: 1)
                 )
                 .position(x: x, y: 6)
-                .onTapGesture(count: 2) {
-                    // Double-click to reset to auto position
-                    audioViewModel.resetMarkerEndPosition(at: markerIndex)
-                }
-                .gesture(
+                .highPriorityGesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { value in
-                            // Store initial position on first drag
                             if !isDragging {
                                 isDragging = true
                                 dragStartPosition = x
                                 dragStartEndPosition = endPosition
                             }
-                            // Calculate new position based on drag start
                             let newX = dragStartPosition + value.translation.width
                             audioViewModel.moveMarkerEndPosition(at: markerIndex, toX: newX, width: geometry.size.width)
                         }
                         .onEnded { _ in
-                            // Reset for next drag
                             isDragging = false
                             dragStartPosition = 0
                             dragStartEndPosition = 0
                         }
+                )
+                .simultaneousGesture(
+                    TapGesture(count: 2).onEnded {
+                        audioViewModel.resetMarkerEndPosition(at: markerIndex)
+                    }
                 )
         }
     }

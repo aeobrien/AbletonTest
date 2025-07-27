@@ -19,23 +19,27 @@ struct PianoKeyboardView: View {
                 let totalWidth = whiteKeys.reduce(0) { $0 + ($1.width ?? 0) }
                 
                 VStack(spacing: 0) {
-                    // Octave labels
-                    ZStack(alignment: .leading) {
-                        ForEach(keys.filter { $0.isWhite && $0.name.contains("C") && !$0.name.contains("#") }) { key in
-                            // Use the actual xOffset of the C key
-                            let cKeyOffset = key.xOffset ?? 0
-                            // F# is 6 keys after C (C, C#, D, D#, E, F, F#)
-                            // In terms of white keys, it's about 3.5 keys from C
-                            let whiteKeyWidth = key.width ?? 0
-                            let labelOffset = cKeyOffset + (whiteKeyWidth * 3.5)
-                            
-                            Text(getOctaveFromKeyName(key.name))
+                    // Octave labels (anchored to F# black keys)
+                    ZStack(alignment: .topLeading) {
+                        // Find visible F# black keys and place the octave label centred above each
+                        ForEach(
+                            keys.filter { !$0.isWhite && $0.name.hasPrefix("F#") }
+                        ) { key in
+                            // Centre of the F# key in the overlay coordinate space
+                            let centerX = (key.xOffset ?? 0) + ((key.width ?? 0) / 2)
+
+                            Text(getOctaveFromKeyName(key.name)) // e.g. "4", "-1", etc.
                                 .font(.system(size: 12, weight: .medium))
-                                .offset(x: labelOffset)
+                                // Absolute placement: x at the key centre, y mid‑height of the label strip
+                                .position(x: centerX, y: 7.5)
                         }
                     }
-                    .frame(height: 15)
+                    // Make sure this matches the keyboard width so .position() works as intended
+                    .frame(width: whiteKeys.reduce(0) { $0 + ($1.width ?? 0) }, height: 15)
+
+
                     
+                    // KEYS + SEPARATORS
                     ZStack(alignment: .topLeading) {
                         // White Keys
                         HStack(spacing: 0) {
@@ -46,7 +50,7 @@ struct PianoKeyboardView: View {
                                 .environmentObject(viewModel)
                             }
                         }
-                        
+
                         // Black Keys
                         ForEach(keys.filter { !$0.isWhite }) { key in
                             KeyView(key: key, availableHeight: availableHeight - 15) { selectedKeyId in
@@ -56,7 +60,22 @@ struct PianoKeyboardView: View {
                             .zIndex(1)
                             .environmentObject(viewModel)
                         }
+
+                        // Octave separators (B|C lines) – extend from top to bottom of KEYS only
+                        GeometryReader { geo in
+                            ForEach(keys.filter { $0.isWhite && $0.name.hasPrefix("C") }) { key in
+                                let xPos = key.xOffset ?? 0
+                                Path { p in
+                                    p.move(to: CGPoint(x: xPos, y: 0))
+                                    p.addLine(to: CGPoint(x: xPos, y: geo.size.height))
+                                }
+                                .stroke(Color.black, lineWidth: 1)
+                            }
+                        }
                     }
+                    // 👇 Ensure the ZStack’s height equals the key area
+                    .frame(height: availableHeight - 15)
+             
                 }
                 .frame(width: max(totalWidth, 10), height: availableHeight)
                 .background(
