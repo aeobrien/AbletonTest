@@ -249,8 +249,17 @@ struct ContentView: View {
                                     .font(.caption2)
                                     .foregroundColor(.secondary)
                                 HStack {
-                                    Slider(value: $audioViewModel.zoomLevel, in: 1...500)
-                                        .frame(width: 150)
+                                    Slider(
+                                        value: Binding(
+                                            get: { audioViewModel.zoomLevel },
+                                            set: { newZoom in
+                                                // Always zoom centered on the waveform
+                                                audioViewModel.zoom(by: newZoom / audioViewModel.zoomLevel, at: 0.5, in: 1.0)
+                                            }
+                                        ),
+                                        in: 1...500
+                                    )
+                                    .frame(width: 150)
                                     Text(String(format: "%.0fx", audioViewModel.zoomLevel))
                                         .font(.caption)
                                         .frame(width: 35)
@@ -721,54 +730,78 @@ struct GroupAssignmentPopover: View {
 
 // MARK: - Marker Handle View
 
+// MARK: - Marker Handle View
 struct MarkerHandle: View {
     let marker: Marker
     let markerIndex: Int
     let geometry: GeometryProxy
     @ObservedObject var audioViewModel: EnhancedAudioViewModel
-    
+
     @State private var isDragging = false
     @State private var dragStartPosition: CGFloat = 0
     @State private var dragStartSamplePosition: Int = 0
-    
+    @State private var translationBaseline: CGFloat = 0
+
     var body: some View {
         let x = audioViewModel.xPosition(for: marker.samplePosition, in: geometry.size.width)
-        
-        // Only show if marker is visible
+
         if x >= 0 && x <= geometry.size.width {
             Circle()
                 .fill(marker.group == nil ? Color.red : Color.green)
                 .frame(width: 12, height: 12)
-                .overlay(
-                    Circle()
-                        .stroke(Color.white, lineWidth: 1)
-                )
+                .overlay(Circle().stroke(Color.white, lineWidth: 1))
                 .position(x: x, y: 6)
                 .highPriorityGesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { value in
+                            var didWarpThisTick = false
+
                             if !isDragging {
                                 isDragging = true
                                 dragStartPosition = x
                                 dragStartSamplePosition = marker.samplePosition
-                                print("Marker drag start - markerIndex: \(markerIndex), x: \(x), samplePos: \(marker.samplePosition)")
+                                translationBaseline = 0
+
                                 // Auto-zoom if in inspect mode
                                 if audioViewModel.isInspectingTransients {
                                     audioViewModel.startTransientDragInInspectMode(marker: marker)
-                                    // Recalculate dragStartPosition after zoom
+
+                                    // Recompute handle X at the new zoom
                                     let oldDragStart = dragStartPosition
-                                    dragStartPosition = audioViewModel.xPosition(for: marker.samplePosition, in: geometry.size.width)
-                                    print("Recalculated dragStartPosition after zoom: \(oldDragStart) -> \(dragStartPosition)")
+                                    dragStartPosition = audioViewModel.xPosition(for: marker.samplePosition,
+                                                                                 in: geometry.size.width)
+                                    // Warp cursor to the marker's new on-screen position
+                                    if let window = NSApp.mainWindow {
+                                        let markerScreenLocation = window.convertPoint(
+                                            toScreen: NSPoint(
+                                                x: geometry.frame(in: .global).minX + dragStartPosition + value.translation.width,
+                                                y: geometry.frame(in: .global).minY + 6 + value.translation.height
+                                            )
+                                        )
+                                        CGWarpMouseCursorPosition(CGPoint(x: markerScreenLocation.x, y: markerScreenLocation.y))
+                                    }
+
+                                    // Compensate for the *warp delta*, not the current (near-zero) translation.
+                                    let warpDelta = dragStartPosition - oldDragStart
+                                    translationBaseline = value.translation.width + warpDelta
+
+                                    // Skip moving on this tick; the next onChanged will include the warp in translation.
+                                    didWarpThisTick = true
                                 }
                             }
-                            let newX = dragStartPosition + value.translation.width
+
+                            // After the first tick, subtract the baseline so the marker doesn't jump.
+                            if didWarpThisTick { return }
+
+                            let effectiveTranslation = value.translation.width - translationBaseline
+                            let newX = dragStartPosition + effectiveTranslation
                             audioViewModel.moveMarker(at: markerIndex, toX: newX, width: geometry.size.width)
                         }
                         .onEnded { _ in
                             isDragging = false
                             dragStartPosition = 0
                             dragStartSamplePosition = 0
-                            // Return to normal inspect zoom
+                            translationBaseline = 0
                             if audioViewModel.isInspectingTransients {
                                 audioViewModel.endTransientDragInInspectMode()
                             }
@@ -782,6 +815,9 @@ struct MarkerHandle: View {
         }
     }
 }
+
+
+
 
 // MARK: - Region End Handle View
 

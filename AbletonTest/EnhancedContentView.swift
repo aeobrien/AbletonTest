@@ -357,20 +357,32 @@ final class EnhancedAudioViewModel: ObservableObject {
     }
     
     // MARK: Zoom and scroll helpers
+    // MARK: Zoom and scroll helpers
     func zoom(by factor: Double, at location: CGFloat, in width: CGFloat) {
+        // Compute the target zoom without mutating state first
         let oldZoom = zoomLevel
-        zoomLevel = max(1.0, min(500.0, zoomLevel * factor))  // Increased max zoom to 500x
+        let newZoom = max(1.0, min(500.0, oldZoom * factor))
         
-        // Adjust scroll to keep the zoom point stationary
-        if zoomLevel != oldZoom {
-            let normalizedLocation = location / width
-            let sampleAtLocation = visibleStart + Int(normalizedLocation * Double(visibleLength))
-            
-            let newVisibleLength = Double(totalSamples) / zoomLevel
-            let newStart = Double(sampleAtLocation) - normalizedLocation * newVisibleLength
-            scrollOffset = max(0, min(1 - 1/zoomLevel, newStart / Double(totalSamples)))
-        }
+        guard newZoom != oldZoom,
+              totalSamples > 0,
+              width > 0 else { return }
+        
+        // Normalised pointer location in [0, 1]
+        let normalizedLocation = max(0, min(1, location / width))
+        
+        // Use the OLD visible length to find which sample is under the anchor
+        let oldVisibleLength = Double(totalSamples) / oldZoom
+        let sampleAtLocation = Double(visibleStart) + normalizedLocation * oldVisibleLength
+        
+        // Now switch to the new zoom and compute the new start so the anchor stays put
+        let newVisibleLength = Double(totalSamples) / newZoom
+        let newStart = sampleAtLocation - normalizedLocation * newVisibleLength
+        
+        // Commit state
+        zoomLevel = newZoom
+        scrollOffset = max(0, min(1 - 1/newZoom, newStart / Double(totalSamples)))
     }
+
     
     func scroll(by delta: Double) {
         scrollOffset = max(0, min(1 - 1/zoomLevel, scrollOffset + delta))
@@ -1035,17 +1047,23 @@ struct EnhancedWaveformView: View {
         }
         .frame(height: height)
         .background(
-            ScrollWheelHandler(onScroll: { deltaX, deltaY in
-                // Handle both horizontal and vertical scrolling with improved sensitivity
-                let horizontalScroll = Double(deltaX) / 500.0  // Increased sensitivity
-                let verticalScroll = Double(deltaY) / 500.0
-                
-                // Use whichever has larger magnitude
-                if abs(deltaX) > 0.1 || abs(deltaY) > 0.1 {  // Lower threshold
-                    let scrollAmount = abs(deltaX) > abs(deltaY) ? horizontalScroll : -verticalScroll
-                    viewModel.scroll(by: -scrollAmount) // Negative for natural scrolling
+            ScrollWheelHandler(
+                onScroll: { deltaX, deltaY in
+                    // Handle both horizontal and vertical scrolling with improved sensitivity
+                    let horizontalScroll = Double(deltaX) / 3000.0  // Increased sensitivity
+                    let verticalScroll = Double(deltaY) / 3000.0
+                    
+                    // Use whichever has larger magnitude
+                    if abs(deltaX) > 0.1 || abs(deltaY) > 0.1 {  // Lower threshold
+                        let scrollAmount = abs(deltaX) > abs(deltaY) ? horizontalScroll : -verticalScroll
+                        viewModel.scroll(by: scrollAmount) // Removed negative for flipped scrolling
+                    }
+                },
+                zoomLevel: $viewModel.zoomLevel,
+                onZoom: { factor, location, width in
+                    viewModel.zoom(by: factor, at: location, in: width)
                 }
-            })
+            )
         )
         .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in
             guard let provider = providers.first else { return false }
@@ -1602,10 +1620,14 @@ struct EnhancedContentView: View {
 // MARK: - ScrollWheel Handler
 struct ScrollWheelHandler: NSViewRepresentable {
     let onScroll: (CGFloat, CGFloat) -> Void
+    @Binding var zoomLevel: Double
+    let onZoom: (Double, CGFloat, CGFloat) -> Void  // factor, location, width
     
     class Coordinator: NSObject {
         var parent: ScrollWheelHandler
         var eventMonitor: Any?
+        var magnificationMonitor: Any?
+        var viewBounds: NSRect = .zero
         
         init(parent: ScrollWheelHandler) {
             self.parent = parent
@@ -1613,6 +1635,9 @@ struct ScrollWheelHandler: NSViewRepresentable {
         
         deinit {
             if let monitor = eventMonitor {
+                NSEvent.removeMonitor(monitor)
+            }
+            if let monitor = magnificationMonitor {
                 NSEvent.removeMonitor(monitor)
             }
         }
@@ -1635,6 +1660,23 @@ struct ScrollWheelHandler: NSViewRepresentable {
                 if view.bounds.contains(locationInView) {
                     print("ScrollWheel event captured - deltaX: \(event.scrollingDeltaX), deltaY: \(event.scrollingDeltaY)")
                     context.coordinator.parent.onScroll(event.scrollingDeltaX, event.scrollingDeltaY)
+                }
+            }
+            return event
+        }
+        
+        // Add magnification (pinch) gesture monitor
+        context.coordinator.magnificationMonitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify]) { event in
+            // Check if the event is within our view
+            if let window = view.window {
+                let locationInWindow = event.locationInWindow
+                let locationInView = view.convert(locationInWindow, from: nil)
+                if view.bounds.contains(locationInView) {
+                    print("Magnification event captured - magnification: \(event.magnification), location: \(locationInView)")
+                    // Apply zoom centered at cursor position
+                    let zoomFactor = 1.0 + Double(event.magnification)
+                    context.coordinator.viewBounds = view.bounds
+                    context.coordinator.parent.onZoom(zoomFactor, locationInView.x, view.bounds.width)
                 }
             }
             return event
