@@ -434,7 +434,7 @@ struct ContentView: View {
             }
         } message: {
             if let info = audioViewModel.pendingOutlierInfo {
-                let outlierCount = info.outlierInfo.outlierIndices.count
+                let outlierCount = info.outlierInfo.outlierMarkerIDs.count
                 let normalLengthSeconds = Double(info.outlierInfo.suggestedTrimLength) / 44100.0
                 Text("\(outlierCount) region\(outlierCount == 1 ? " is" : "s are") significantly longer than the others. The typical regions are \(String(format: "%.1f", normalLengthSeconds)) seconds or shorter. Would you like to automatically trim the longer regions to match?")
             }

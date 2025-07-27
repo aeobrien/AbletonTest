@@ -15,7 +15,7 @@ private func endOfRegion(after marker: Marker, markers: [Marker], totalSamples: 
 
 // MARK: - Outlier Detection
 struct OutlierInfo {
-    let outlierIndices: [Int]
+    let outlierMarkerIDs: [UUID]  // Store marker IDs instead of indices
     let normalRange: ClosedRange<Int>
     let suggestedTrimLength: Int
 }
@@ -273,7 +273,14 @@ final class EnhancedAudioViewModel: ObservableObject {
     
     // This should be called whenever a region's endpoint is updated programmatically
     func updateRegionEndpoint(markerIndex: Int, newEndPosition: Int, isUserAction: Bool = false) {
-        guard markerIndex >= 0 && markerIndex < markers.count else { return }
+        guard markerIndex >= 0 && markerIndex < markers.count else { 
+            print("DEBUG: updateRegionEndpoint - Invalid marker index \(markerIndex)")
+            return 
+        }
+        
+        let oldEndPosition = markers[markerIndex].customEndPosition
+        print("DEBUG: updateRegionEndpoint - Marker \(markerIndex) at position \(markers[markerIndex].samplePosition)")
+        print("DEBUG: updateRegionEndpoint - Old end: \(String(describing: oldEndPosition)), New end: \(newEndPosition)")
         
         if isUserAction {
             // User explicitly set this endpoint, respect their choice
@@ -283,6 +290,8 @@ final class EnhancedAudioViewModel: ObservableObject {
             markers[markerIndex].customEndPosition = newEndPosition
             adjustRegionEndpointIfNeeded(markerIndex: markerIndex, newEndPosition: newEndPosition)
         }
+        
+        print("DEBUG: updateRegionEndpoint - Final end position: \(String(describing: markers[markerIndex].customEndPosition))")
     }
     
     func deleteMarker(at index: Int) {
@@ -554,15 +563,17 @@ final class EnhancedAudioViewModel: ObservableObject {
         let upperBound = q3 + Int(1.5 * Double(iqr))
         
         // Find outliers
-        var outlierIndices: [Int] = []
+        var outlierMarkerIDs: [UUID] = []
+        var outlierIndices: [Int] = []  // Keep for internal use
         for (originalIndex, length) in regionLengths {
             if length > upperBound {
                 outlierIndices.append(originalIndex)
+                outlierMarkerIDs.append(sortedMarkers[originalIndex].id)
             }
         }
         
         // If we have outliers, calculate suggested trim length
-        guard !outlierIndices.isEmpty else { return nil }
+        guard !outlierMarkerIDs.isEmpty else { return nil }
         
         // Find the longest non-outlier region
         let nonOutlierLengths = regionLengths
@@ -572,7 +583,7 @@ final class EnhancedAudioViewModel: ObservableObject {
         guard let maxNormalLength = nonOutlierLengths.max() else { return nil }
         
         return OutlierInfo(
-            outlierIndices: outlierIndices,
+            outlierMarkerIDs: outlierMarkerIDs,
             normalRange: q1...q3,
             suggestedTrimLength: maxNormalLength
         )
@@ -583,13 +594,14 @@ final class EnhancedAudioViewModel: ObservableObject {
         
         // Trim the outlier regions
         for (index, marker) in info.markersToAssign {
-            // Check if this is an outlier
-            let markerPosition = marker.samplePosition
-            let sortedMarkers = markers.sorted { $0.samplePosition < $1.samplePosition }
-            if let sortedIndex = sortedMarkers.firstIndex(where: { $0.id == marker.id }),
-               info.outlierInfo.outlierIndices.contains(sortedIndex) {
+            // Check if this marker is an outlier by ID
+            if info.outlierInfo.outlierMarkerIDs.contains(marker.id) {
                 // Trim this region to the suggested length
+                let markerPosition = marker.samplePosition
                 let newEndPosition = markerPosition + info.outlierInfo.suggestedTrimLength
+                
+                print("DEBUG: Trimming outlier marker at position \(markerPosition) from current length to \(info.outlierInfo.suggestedTrimLength)")
+                
                 updateRegionEndpoint(markerIndex: index, newEndPosition: newEndPosition, isUserAction: false)
             }
             // Assign to group
