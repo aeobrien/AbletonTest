@@ -18,32 +18,61 @@ struct PianoKeyboardView: View {
                 let whiteKeys = keys.filter { $0.isWhite }
                 let totalWidth = whiteKeys.reduce(0) { $0 + ($1.width ?? 0) }
                 
-                ZStack(alignment: .topLeading) {
-                    // White Keys
-                    HStack(spacing: 0) {
-                        ForEach(keys.filter { $0.isWhite }) { key in
-                            KeyView(key: key, availableHeight: availableHeight) { selectedKeyId in
+                VStack(spacing: 0) {
+                    // Octave labels
+                    ZStack(alignment: .leading) {
+                        ForEach(keys.filter { $0.isWhite && $0.name.contains("C") && !$0.name.contains("#") }) { key in
+                            // Use the actual xOffset of the C key
+                            let cKeyOffset = key.xOffset ?? 0
+                            // F# is 6 keys after C (C, C#, D, D#, E, F, F#)
+                            // In terms of white keys, it's about 3.5 keys from C
+                            let whiteKeyWidth = key.width ?? 0
+                            let labelOffset = cKeyOffset + (whiteKeyWidth * 3.5)
+                            
+                            Text(getOctaveFromKeyName(key.name))
+                                .font(.system(size: 12, weight: .medium))
+                                .offset(x: labelOffset)
+                        }
+                    }
+                    .frame(height: 15)
+                    
+                    ZStack(alignment: .topLeading) {
+                        // White Keys
+                        HStack(spacing: 0) {
+                            ForEach(keys.filter { $0.isWhite }) { key in
+                                KeyView(key: key, availableHeight: availableHeight - 15) { selectedKeyId in
+                                    onKeySelect(selectedKeyId)
+                                }
+                                .environmentObject(viewModel)
+                            }
+                        }
+                        
+                        // Black Keys
+                        ForEach(keys.filter { !$0.isWhite }) { key in
+                            KeyView(key: key, availableHeight: availableHeight - 15) { selectedKeyId in
                                 onKeySelect(selectedKeyId)
                             }
+                            .offset(x: key.xOffset ?? 0, y: 0)
+                            .zIndex(1)
                             .environmentObject(viewModel)
                         }
                     }
-                    
-                    // Black Keys
-                    ForEach(keys.filter { !$0.isWhite }) { key in
-                        KeyView(key: key, availableHeight: availableHeight) { selectedKeyId in
-                            onKeySelect(selectedKeyId)
-                        }
-                        .offset(x: key.xOffset ?? 0, y: 0)
-                        .zIndex(1)
-                        .environmentObject(viewModel)
-                    }
                 }
                 .frame(width: max(totalWidth, 10), height: availableHeight)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                        .background(Color.clear)
+                )
             }
             .frame(height: geometry.size.height)
-            .border(Color.gray)
         }
+    }
+    
+    private func getOctaveFromKeyName(_ keyName: String) -> String {
+        // Extract octave number from key name (e.g., "C4" -> "4")
+        let octave = keyName.filter { $0.isNumber || $0 == "-" }
+        return octave.isEmpty ? "" : octave
     }
 }
 
@@ -65,8 +94,11 @@ struct KeyView: View {
     private var keyDrawingHeight: CGFloat {
         let heightForDrawing = availableHeight - keyLabelSpace
         let positiveHeight = max(0, heightForDrawing)
-        let visuallyShorterHeight = max(0, positiveHeight - 40)
-        return key.isWhite ? visuallyShorterHeight : visuallyShorterHeight * 0.65
+        if key.isWhite {
+            return positiveHeight  // Use full available height for white keys
+        } else {
+            return positiveHeight * 0.5  // Black keys are 50% of white key height
+        }
     }
     
     var body: some View {
@@ -89,7 +121,7 @@ struct KeyView: View {
                 )
             
             if key.isWhite {
-                Text(key.name)
+                Text(getNoteNameWithoutOctave(key.name))
                     .font(.system(size: 10))
                     .frame(width: key.width, height: keyLabelSpace)
                     .lineLimit(1)
@@ -124,6 +156,12 @@ struct KeyView: View {
     
     private var borderColor: Color {
         isSelected ? Color.blue : Color.black
+    }
+    
+    private func getNoteNameWithoutOctave(_ keyName: String) -> String {
+        // Extract just the note name without octave (e.g., "C4" -> "C", "F#3" -> "F#")
+        let noteName = keyName.filter { !$0.isNumber && $0 != "-" }
+        return noteName.isEmpty ? keyName : noteName
     }
     
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
@@ -226,7 +264,6 @@ struct VelocityLayerRow: View {
     let layerIndex: Int
     let keyId: Int
     @EnvironmentObject var viewModel: SamplerViewModel
-    @State private var showPitchedModeSettings = false
     
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -236,17 +273,6 @@ struct VelocityLayerRow: View {
                     .fontWeight(.medium)
                 
                 Spacer()
-                
-                if layer.activeSampleCount > 0 {
-                    Menu {
-                        Button(action: { showPitchedModeSettings.toggle() }) {
-                            Label("Pitched Mode Settings...", systemImage: "slider.horizontal.3")
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                            .foregroundColor(.secondary)
-                    }
-                }
                 
                 Text("\(layer.activeSampleCount) samples")
                     .font(.caption)
@@ -283,10 +309,6 @@ struct VelocityLayerRow: View {
         .padding()
         .background(Color.gray.opacity(0.1))
         .cornerRadius(8)
-        .sheet(isPresented: $showPitchedModeSettings) {
-            PitchedModeSettingsView(layer: $layer, keyId: keyId)
-                .environmentObject(viewModel)
-        }
     }
     
     private func handleSampleDrop(url: URL, rrIndex: Int) {
@@ -412,146 +434,3 @@ struct RoundRobinSlot: View {
     }
 }
 
-// MARK: - Pitched Mode Settings View
-
-struct PitchedModeSettingsView: View {
-    @Binding var layer: VelocityLayer
-    let keyId: Int
-    @EnvironmentObject var viewModel: SamplerViewModel
-    @Environment(\.dismiss) var dismiss
-    
-    @State private var keyRangeMin = 0
-    @State private var keyRangeMax = 127
-    @State private var rootKey = 60
-    @State private var isPitched = false
-    
-    var body: some View {
-        VStack(spacing: 20) {
-            Text("Pitched Mode Settings")
-                .font(.headline)
-                .padding(.top)
-            
-            Text("Configure how this velocity layer is mapped across keys")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            
-            Divider()
-            
-            // Pitched mode toggle
-            Toggle("Enable Pitched Mode", isOn: $isPitched)
-                .help("When enabled, the sample will be pitched up/down based on the key pressed")
-            
-            if isPitched {
-                // Root key selector
-                HStack {
-                    Text("Root Key:")
-                    Picker("", selection: $rootKey) {
-                        ForEach(0...127, id: \.self) { note in
-                            Text(noteNameForMIDI(note)).tag(note)
-                        }
-                    }
-                    .frame(width: 100)
-                }
-                .help("The original pitch of the sample")
-                
-                // Key range
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Key Range:")
-                        .font(.subheadline)
-                    
-                    HStack {
-                        Text("Min:")
-                        Picker("", selection: $keyRangeMin) {
-                            ForEach(0...keyRangeMax, id: \.self) { note in
-                                Text(noteNameForMIDI(note)).tag(note)
-                            }
-                        }
-                        .frame(width: 80)
-                        
-                        Text("Max:")
-                        Picker("", selection: $keyRangeMax) {
-                            ForEach(keyRangeMin...127, id: \.self) { note in
-                                Text(noteNameForMIDI(note)).tag(note)
-                            }
-                        }
-                        .frame(width: 80)
-                    }
-                }
-                .help("The range of keys that will trigger this sample")
-            }
-            
-            Divider()
-            
-            // Action buttons
-            HStack(spacing: 20) {
-                Button("Cancel") {
-                    dismiss()
-                }
-                
-                Button("Apply") {
-                    applySettings()
-                    dismiss()
-                }
-                .buttonStyle(.borderedProminent)
-            }
-            
-            Spacer()
-        }
-        .padding()
-        .frame(width: 400, height: 300)
-        .onAppear {
-            loadCurrentSettings()
-        }
-    }
-    
-    private func loadCurrentSettings() {
-        // Load current settings from the first sample in the layer
-        if let firstSample = layer.samples.compactMap({ $0 }).first {
-            isPitched = firstSample.isPitched
-            rootKey = firstSample.originalRootKey ?? firstSample.keyRangeMin
-            keyRangeMin = firstSample.keyRangeMin
-            keyRangeMax = firstSample.keyRangeMax
-        } else {
-            // Default for current key
-            rootKey = keyId
-            keyRangeMin = keyId
-            keyRangeMax = keyId
-        }
-    }
-    
-    private func applySettings() {
-        // Update all samples in the layer
-        for i in layer.samples.indices {
-            if var sample = layer.samples[i] {
-                sample.isPitched = isPitched
-                
-                if isPitched {
-                    // Enable pitched mode
-                    sample.originalRootKey = rootKey
-                    sample.keyRangeMin = keyRangeMin
-                    sample.keyRangeMax = keyRangeMax
-                } else {
-                    // Disable pitched mode
-                    sample.originalRootKey = nil
-                    sample.keyRangeMin = keyId
-                    sample.keyRangeMax = keyId
-                }
-                
-                // Update in layer
-                layer.samples[i] = sample
-                
-                // Update in view model
-                if let index = viewModel.multiSampleParts.firstIndex(where: { $0.id == sample.id }) {
-                    viewModel.multiSampleParts[index] = sample
-                }
-            }
-        }
-    }
-    
-    private func noteNameForMIDI(_ midiNote: Int) -> String {
-        let noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-        let octave = (midiNote / 12) - 2
-        let noteIndex = midiNote % 12
-        return "\(noteNames[noteIndex])\(octave)"
-    }
-}

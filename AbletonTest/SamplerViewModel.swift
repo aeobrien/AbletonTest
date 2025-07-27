@@ -74,8 +74,16 @@ class SamplerViewModel: ObservableObject {
     }
     
     private func loadVelocityLayersForKey(_ keyId: Int) {
-        // Get all samples for this key
-        let samplesForKey = multiSampleParts.filter { $0.keyRangeMin == keyId && $0.keyRangeMax == keyId }
+        // Get all samples for this key (including pitched samples that span this key)
+        let samplesForKey = multiSampleParts.filter { sample in
+            if sample.isPitched {
+                // For pitched samples, check if key is within the range
+                return keyId >= sample.keyRangeMin && keyId <= sample.keyRangeMax
+            } else {
+                // For non-pitched samples, only exact matches
+                return sample.keyRangeMin == keyId && sample.keyRangeMax == keyId
+            }
+        }
         
         // Group by velocity range
         var layersByRange: [VelocityRangeData: [MultiSamplePartData]] = [:]
@@ -93,6 +101,55 @@ class SamplerViewModel: ObservableObject {
     }
     
     // MARK: - Transient Group Integration
+    
+    /// Maps transient groups to a pitched key range
+    @MainActor
+    func mapTransientGroupsToPitchedRange(groups: [TransientGroup], keyRangeMin: Int, keyRangeMax: Int, rootKey: Int, splitMode: VelocitySplitMode) {
+        guard let audioURL = audioViewModel?.audioURL,
+              let sampleBuffer = audioViewModel?.sampleBuffer else {
+            showError("No audio file loaded")
+            return
+        }
+        
+        // Clear existing layers for this range
+        multiSampleParts.removeAll { part in
+            part.keyRangeMin >= keyRangeMin && part.keyRangeMax <= keyRangeMax
+        }
+        
+        // Calculate velocity ranges based on split mode
+        let velocityRanges = calculateVelocityRanges(for: groups.count, mode: splitMode)
+        
+        // Create sample parts for each group
+        for (index, group) in groups.enumerated() {
+            let velocityRange = velocityRanges[index]
+            
+            // Create sample parts for each marker in the group (as round robins)
+            for (rrIndex, marker) in group.markers.enumerated() {
+                var samplePart = createSamplePartFromMarker(
+                    marker: marker,
+                    keyId: rootKey,  // Use rootKey for initial creation
+                    velocityRange: velocityRange,
+                    roundRobinIndex: rrIndex,
+                    audioURL: audioURL,
+                    sampleBuffer: sampleBuffer
+                )
+                
+                // Configure for pitched mode
+                samplePart.isPitched = true
+                samplePart.originalRootKey = rootKey
+                samplePart.keyRangeMin = keyRangeMin
+                samplePart.keyRangeMax = keyRangeMax
+                
+                multiSampleParts.append(samplePart)
+            }
+        }
+        
+        // Reload velocity layers if we're viewing a key in this range
+        if let selectedId = selectedKeyId,
+           selectedId >= keyRangeMin && selectedId <= keyRangeMax {
+            loadVelocityLayersForKey(selectedId)
+        }
+    }
     
     /// Maps transient groups to velocity layers on the selected key
     @MainActor
@@ -138,14 +195,19 @@ class SamplerViewModel: ObservableObject {
         // Calculate segment boundaries
         let segmentStart = Int64(marker.samplePosition)
         
-        // Find the next marker position or use end of file
-        let allMarkerPositions = audioViewModel?.markers.map { $0.samplePosition }.sorted() ?? []
-        let nextMarkerIndex = allMarkerPositions.firstIndex { $0 > marker.samplePosition }
+        // Use custom end position if available
         let segmentEnd: Int64
-        if let nextIndex = nextMarkerIndex {
-            segmentEnd = Int64(allMarkerPositions[nextIndex])
+        if let customEnd = marker.customEndPosition {
+            segmentEnd = Int64(customEnd)
         } else {
-            segmentEnd = Int64(sampleBuffer.samples.count)
+            // Find the next marker position or use end of file
+            let allMarkerPositions = audioViewModel?.markers.map { $0.samplePosition }.sorted() ?? []
+            let nextMarkerIndex = allMarkerPositions.firstIndex { $0 > marker.samplePosition }
+            if let nextIndex = nextMarkerIndex {
+                segmentEnd = Int64(allMarkerPositions[nextIndex])
+            } else {
+                segmentEnd = Int64(sampleBuffer.samples.count)
+            }
         }
         
         // Get audio file metadata

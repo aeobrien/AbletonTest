@@ -21,14 +21,19 @@ final class EnhancedAudioViewModel: ObservableObject {
     @Published var yScale: Double = 1.0
     
     // Group assignment controls
-    @Published var autoAssignGroups = true
+    @Published var autoAssignGroups = false  // Changed to false by default
     @Published var showGroupAssignmentMenu = false
     @Published var pendingGroupAssignment: ClosedRange<Int>? = nil
     
     // Transient detection
     @Published var transientThreshold: Double = 0.3
+    @Published var transientOffsetMs: Double = 0.0  // Milliseconds to pre-empt transients
     @Published var transientMarkers: Set<Int> = []
-    var hasDetectedTransients = false
+    @Published var hasDetectedTransients = false
+    
+    // Transient inspection mode
+    @Published var isInspectingTransients = false
+    @Published var currentTransientIndex = 0
     
     // Computed properties for visible range
     var visibleStart: Int {
@@ -136,6 +141,29 @@ final class EnhancedAudioViewModel: ObservableObject {
         return nil
     }
     
+    func moveMarkerEndPosition(at index: Int, toX x: CGFloat, width: CGFloat) {
+        guard index >= 0 && index < markers.count else { return }
+        let newEndPosition = sampleIndex(for: x, in: width)
+        markers[index].customEndPosition = newEndPosition
+    }
+    
+    func resetMarkerEndPosition(at index: Int) {
+        guard index >= 0 && index < markers.count else { return }
+        markers[index].customEndPosition = nil
+    }
+    
+    func deleteMarker(at index: Int) {
+        guard index >= 0 && index < markers.count else { return }
+        let marker = markers[index]
+        
+        // Remove from transientMarkers if it's a transient
+        if marker.group == nil {
+            transientMarkers.remove(marker.samplePosition)
+        }
+        
+        markers.remove(at: index)
+    }
+    
     func moveMarker(at index: Int, toX x: CGFloat, width: CGFloat) {
         guard index >= 0 && index < markers.count else { return }
         let oldSamplePosition = markers[index].samplePosition
@@ -177,6 +205,25 @@ final class EnhancedAudioViewModel: ObservableObject {
     func clearSelection() {
         tempSelection = nil
         pendingGroupAssignment = nil
+    }
+    
+    func zoomToSelection() {
+        guard let selection = tempSelection ?? pendingGroupAssignment,
+              totalSamples > 0 else { return }
+        
+        // Calculate the zoom level needed to fill the view with the selection
+        let selectionLength = selection.upperBound - selection.lowerBound
+        let desiredZoomLevel = Double(totalSamples) / Double(selectionLength)
+        
+        // Apply reasonable limits
+        zoomLevel = max(1.0, min(500.0, desiredZoomLevel * 0.9)) // 0.9 to add some padding
+        
+        // Center the view on the selection
+        let selectionCenter = Double(selection.lowerBound + selection.upperBound) / 2.0
+        let centerOffset = selectionCenter / Double(totalSamples)
+        
+        // Calculate offset to center the selection
+        scrollOffset = max(0, min(1.0 - 1.0/zoomLevel, centerOffset - 0.5/zoomLevel))
     }
     
     func assignToGroup(_ groupNumber: Int) {
@@ -259,20 +306,36 @@ final class EnhancedAudioViewModel: ObservableObject {
             return 
         }
         
+        // Determine the region to analyze
+        let startSample: Int
+        let endSample: Int
+        if let selection = tempSelection {
+            // Use selected region
+            startSample = selection.lowerBound
+            endSample = selection.upperBound
+            print("Detecting transients in selected region: \(startSample) to \(endSample)")
+        } else {
+            // Use entire file
+            startSample = 0
+            endSample = samples.count
+            print("Detecting transients in entire file")
+        }
+        
         // Use larger window for better transient detection
         let windowSize = 2048
         let hopSize = windowSize / 2
-        let windowCount = (samples.count - windowSize) / hopSize + 1
+        let regionLength = endSample - startSample
+        let windowCount = max(0, (regionLength - windowSize) / hopSize + 1)
         
         var energyValues: [Float] = []
         
         // Calculate energy for each window
         for i in 0..<windowCount {
-            let startIdx = i * hopSize
-            let endIdx = min(startIdx + windowSize, samples.count)
+            let windowStart = startSample + i * hopSize
+            let windowEnd = min(windowStart + windowSize, endSample)
             
-            if endIdx > startIdx {
-                let window = Array(samples[startIdx..<endIdx])
+            if windowEnd > windowStart {
+                let window = Array(samples[windowStart..<windowEnd])
                 let energy = window.reduce(0.0) { $0 + abs($1) } / Float(window.count)
                 energyValues.append(energy)
             }
@@ -304,15 +367,20 @@ final class EnhancedAudioViewModel: ObservableObject {
                 
                 // Check if this is a local peak above threshold
                 if curr > prev && curr > next && curr > detectionThreshold {
-                    let samplePosition = i * hopSize
+                    let samplePosition = startSample + i * hopSize  // Add region offset
                     
                     // Check minimum spacing
                     if samplePosition - lastTransientSample >= minSpacing {
-                        detectedTransients.insert(samplePosition)
+                        // Apply offset (convert ms to samples)
+                        let sampleRate = 44100.0  // Assuming standard sample rate
+                        let offsetSamples = Int(transientOffsetMs * sampleRate / 1000.0)
+                        let adjustedPosition = max(0, samplePosition - offsetSamples)
+                        
+                        detectedTransients.insert(adjustedPosition)
                         lastTransientSample = samplePosition
                         
                         if detectedTransients.count <= 10 {
-                            print("Transient at window \(i) -> sample \(samplePosition) (energy: \(curr))")
+                            print("Transient at window \(i) -> sample \(samplePosition) (adjusted to \(adjustedPosition) with \(transientOffsetMs)ms offset, energy: \(curr))")
                         }
                     }
                 }
@@ -347,6 +415,99 @@ final class EnhancedAudioViewModel: ObservableObject {
         markers.sort { $0.samplePosition < $1.samplePosition }
     }
     
+    func clearDetectedTransients() {
+        // Remove all markers that were created from transient detection (those without groups)
+        markers.removeAll { marker in
+            marker.group == nil && transientMarkers.contains(marker.samplePosition)
+        }
+        transientMarkers.removeAll()
+        hasDetectedTransients = false
+    }
+    
+    func startTransientInspection() {
+        guard !transientMarkers.isEmpty else { return }
+        isInspectingTransients = true
+        currentTransientIndex = 0
+        focusOnTransient(at: currentTransientIndex)
+    }
+    
+    func stopTransientInspection() {
+        isInspectingTransients = false
+    }
+    
+    func nextTransient() {
+        let sortedTransients = Array(transientMarkers).sorted()
+        guard !sortedTransients.isEmpty else { return }
+        currentTransientIndex = (currentTransientIndex + 1) % sortedTransients.count
+        focusOnTransient(at: currentTransientIndex)
+    }
+    
+    func previousTransient() {
+        let sortedTransients = Array(transientMarkers).sorted()
+        guard !sortedTransients.isEmpty else { return }
+        currentTransientIndex = (currentTransientIndex - 1 + sortedTransients.count) % sortedTransients.count
+        focusOnTransient(at: currentTransientIndex)
+    }
+    
+    private func focusOnTransient(at index: Int) {
+        let sortedTransients = Array(transientMarkers).sorted()
+        guard index >= 0 && index < sortedTransients.count else { return }
+        
+        let transientPosition = sortedTransients[index]
+        
+        // Find the end position (next transient or end of file)
+        let endPosition: Int
+        if index < sortedTransients.count - 1 {
+            endPosition = sortedTransients[index + 1]
+        } else {
+            endPosition = totalSamples
+        }
+        
+        // Calculate the region size
+        let regionSize = endPosition - transientPosition
+        let regionSizeRatio = Double(regionSize) / Double(totalSamples)
+        
+        // Set zoom to show the entire region with some padding
+        let paddingRatio = 0.2 // 20% padding on each side
+        let targetZoom = 1.0 / (regionSizeRatio * (1.0 + paddingRatio * 2))
+        zoomLevel = min(targetZoom, 50.0) // Cap at 50x zoom
+        
+        // Center the view on the region
+        let regionCenter = Double(transientPosition + regionSize / 2) / Double(totalSamples)
+        scrollOffset = max(0, min(1.0 - 1.0/zoomLevel, regionCenter - 0.5/zoomLevel))
+    }
+    
+    func updateTransientOffsets(oldOffset: Double, newOffset: Double) {
+        guard hasDetectedTransients else { return }
+        
+        // Calculate the sample rate and offset difference
+        let sampleRate = 44100.0
+        let oldOffsetSamples = Int(oldOffset * sampleRate / 1000.0)
+        let newOffsetSamples = Int(newOffset * sampleRate / 1000.0)
+        let offsetDifference = oldOffsetSamples - newOffsetSamples
+        
+        // Update transient markers set
+        var newTransientMarkers: Set<Int> = []
+        for position in transientMarkers {
+            // Move marker back to original position then apply new offset
+            let originalPosition = position + oldOffsetSamples
+            let newPosition = max(0, originalPosition - newOffsetSamples)
+            newTransientMarkers.insert(newPosition)
+        }
+        transientMarkers = newTransientMarkers
+        
+        // Update actual markers array
+        for i in markers.indices {
+            if markers[i].group == nil && transientMarkers.contains(markers[i].samplePosition + offsetDifference) {
+                // This is a transient marker, update its position
+                markers[i].samplePosition = max(0, markers[i].samplePosition + offsetDifference)
+            }
+        }
+        
+        // Sort markers by position
+        markers.sort { $0.samplePosition < $1.samplePosition }
+    }
+    
     func updateTransientThreshold(_ newThreshold: Double) {
         print("Threshold slider changed to: \(newThreshold)")
         transientThreshold = newThreshold
@@ -368,6 +529,49 @@ final class EnhancedAudioViewModel: ObservableObject {
             audioPlayer?.prepareToPlay()
         } catch {
             print("Failed to setup audio player: \(error)")
+        }
+    }
+    
+    func playMarkerRegion(marker: Marker) {
+        guard let player = audioPlayer, let buffer = sampleBuffer else { return }
+        
+        // Use custom end position if available
+        let endPosition: Int
+        if let customEnd = marker.customEndPosition {
+            endPosition = customEnd
+        } else {
+            // Find the next marker position or use end of file
+            let allMarkerPositions = markers.map { $0.samplePosition }.sorted()
+            let nextMarkerIndex = allMarkerPositions.firstIndex { $0 > marker.samplePosition }
+            if let nextIndex = nextMarkerIndex {
+                endPosition = allMarkerPositions[nextIndex]
+            } else {
+                endPosition = buffer.samples.count
+            }
+        }
+        
+        // Play the region
+        let sampleRate = player.format.sampleRate
+        let startTime = TimeInterval(marker.samplePosition) / sampleRate
+        let endTime = TimeInterval(endPosition) / sampleRate
+        let duration = endTime - startTime
+        
+        // Stop any current playback
+        player.stop()
+        player.currentTime = startTime
+        player.play()
+        isPlaying = true
+        
+        // Start playhead tracking
+        startPlayheadTracking()
+        
+        // Use a timer to stop at the exact end time
+        Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { _ in
+            if player.isPlaying {
+                player.stop()
+                self.isPlaying = false
+                self.stopPlayheadTracking()
+            }
         }
     }
     
@@ -447,6 +651,7 @@ final class EnhancedAudioViewModel: ObservableObject {
 struct EnhancedWaveformView: View {
     @ObservedObject var viewModel: EnhancedAudioViewModel
     let height: CGFloat = 400  // Doubled height
+    @State private var isTargeted = false
     
     var body: some View {
         ZStack {
@@ -455,7 +660,7 @@ struct EnhancedWaveformView: View {
                 .fill(Color.black.opacity(0.05))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                        .stroke(isTargeted ? Color.blue : Color.gray.opacity(0.3), lineWidth: isTargeted ? 2 : 1)
                 )
             
             // Clipped content area with interaction
@@ -477,6 +682,7 @@ struct EnhancedWaveformView: View {
                                 .allowsHitTesting(false)
                             }
                             
+                            
                             // Markers and playhead overlay
                             Canvas { context, size in
                                 // Draw playhead if playing
@@ -490,46 +696,90 @@ struct EnhancedWaveformView: View {
                                     }
                                 }
                                 
-                                // Draw markers
-                                for marker in viewModel.markers {
-                                    let x = viewModel.xPosition(for: marker.samplePosition, in: size.width)
-                                    
-                                    // Only draw if marker is visible
-                                    if x >= 0 && x <= size.width {
-                                        var markerLine = Path()
-                                        markerLine.move(to: CGPoint(x: x, y: 0))
-                                        markerLine.addLine(to: CGPoint(x: x, y: size.height))
+                                // Draw markers or focused region
+                                if viewModel.isInspectingTransients {
+                                    // In inspection mode, only show the current region
+                                    let sortedTransients = Array(viewModel.transientMarkers).sorted()
+                                    if viewModel.currentTransientIndex >= 0 && viewModel.currentTransientIndex < sortedTransients.count {
+                                        let transientPosition = sortedTransients[viewModel.currentTransientIndex]
                                         
-                                        let color: Color = marker.group == nil ? .red : .green
-                                        context.stroke(markerLine, with: .color(color), lineWidth: 2)
-                                        
-                                        // Draw handle for transient markers (red markers without groups)
-                                        if marker.group == nil {
-                                            let handleSize: CGFloat = 12
-                                            let handleRect = CGRect(
-                                                x: x - handleSize / 2,
-                                                y: 0,
-                                                width: handleSize,
-                                                height: handleSize
-                                            )
-                                            context.fill(Path(ellipseIn: handleRect), with: .color(color))
-                                            context.stroke(Path(ellipseIn: handleRect), with: .color(.white), lineWidth: 1)
-                                        }
-                                        
-                                        // Group label
-                                        if let group = marker.group {
-                                            let text = Text("\(group)")
-                                                .font(.caption)
-                                                .foregroundColor(.white)
+                                        // Find the marker for this transient
+                                        if let marker = viewModel.markers.first(where: { $0.samplePosition == transientPosition }) {
+                                            // Calculate end position
+                                            let endPosition: Int
+                                            if let customEnd = marker.customEndPosition {
+                                                endPosition = customEnd
+                                            } else {
+                                                let sortedMarkers = viewModel.markers.sorted { $0.samplePosition < $1.samplePosition }
+                                                if let currentIndex = sortedMarkers.firstIndex(where: { $0.id == marker.id }),
+                                                   currentIndex < sortedMarkers.count - 1 {
+                                                    endPosition = sortedMarkers[currentIndex + 1].samplePosition
+                                                } else {
+                                                    endPosition = viewModel.totalSamples
+                                                }
+                                            }
                                             
-                                            // Draw background for label
-                                            let textSize = CGSize(width: 20, height: 16)
-                                            let labelRect = CGRect(x: x + 4, y: 12, width: textSize.width, height: textSize.height)
-                                            context.fill(Path(roundedRect: labelRect, cornerRadius: 4), with: .color(color))
-                                            context.draw(text, at: CGPoint(x: x + 14, y: 20))
+                                            let startX = viewModel.xPosition(for: marker.samplePosition, in: size.width)
+                                            let endX = viewModel.xPosition(for: endPosition, in: size.width)
+                                            
+                                            // Draw purple highlight for the region
+                                            if startX <= size.width && endX >= 0 {
+                                                let regionRect = CGRect(
+                                                    x: max(0, startX),
+                                                    y: 0,
+                                                    width: min(size.width, endX) - max(0, startX),
+                                                    height: size.height
+                                                )
+                                                context.fill(Path(regionRect), with: .color(.purple.opacity(0.2)))
+                                            }
+                                            
+                                            // Draw start marker
+                                            if startX >= 0 && startX <= size.width {
+                                                var markerLine = Path()
+                                                markerLine.move(to: CGPoint(x: startX, y: 0))
+                                                markerLine.addLine(to: CGPoint(x: startX, y: size.height))
+                                                context.stroke(markerLine, with: .color(.purple), lineWidth: 2)
+                                            }
+                                            
+                                            // Draw end marker
+                                            if endX >= 0 && endX <= size.width {
+                                                var endLine = Path()
+                                                endLine.move(to: CGPoint(x: endX, y: 0))
+                                                endLine.addLine(to: CGPoint(x: endX, y: size.height))
+                                                context.stroke(endLine, with: .color(.purple), lineWidth: 2)
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Normal mode - show all markers
+                                    for marker in viewModel.markers {
+                                        let x = viewModel.xPosition(for: marker.samplePosition, in: size.width)
+                                        
+                                        // Only draw if marker is visible
+                                        if x >= 0 && x <= size.width {
+                                            var markerLine = Path()
+                                            markerLine.move(to: CGPoint(x: x, y: 0))
+                                            markerLine.addLine(to: CGPoint(x: x, y: size.height))
+                                            
+                                            let color: Color = marker.group == nil ? .red : .green
+                                            context.stroke(markerLine, with: .color(color), lineWidth: 2)
+                                            
+                                            // Group label
+                                            if let group = marker.group {
+                                                let text = Text("\(group)")
+                                                    .font(.caption)
+                                                    .foregroundColor(.white)
+                                                
+                                                // Draw background for label
+                                                let textSize = CGSize(width: 20, height: 16)
+                                                let labelRect = CGRect(x: x + 4, y: 12, width: textSize.width, height: textSize.height)
+                                                context.fill(Path(roundedRect: labelRect, cornerRadius: 4), with: .color(color))
+                                                context.draw(text, at: CGPoint(x: x + 14, y: 20))
+                                            }
                                         }
                                     }
                                 }
+                                
                                 
                                 // Selection rectangle
                                 if let selection = viewModel.tempSelection {
@@ -619,6 +869,94 @@ struct EnhancedWaveformView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8))
         }
         .frame(height: height)
+        .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in
+            guard let provider = providers.first else { return false }
+            
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { (item, error) in
+                if let error = error {
+                    print("Error loading dropped file: \(error)")
+                    return
+                }
+                
+                var fileURL: URL?
+                if let urlData = item as? Data {
+                    fileURL = URL(dataRepresentation: urlData, relativeTo: nil)
+                } else if let url = item as? URL {
+                    fileURL = url
+                }
+                
+                if let url = fileURL, url.pathExtension.lowercased() == "wav" {
+                    DispatchQueue.main.async {
+                        // Access the file directly without security-scoped resource
+                        viewModel.importWAV(from: url)
+                    }
+                } else {
+                    print("Dropped file is not a WAV file or URL could not be extracted")
+                }
+            }
+            return true
+        }
+        .overlay(
+            Group {
+                if isTargeted {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.blue.opacity(0.1))
+                            .allowsHitTesting(false)
+                        Text("Drop WAV file here")
+                            .font(.headline)
+                            .foregroundColor(.blue)
+                    }
+                }
+            }
+        )
+    }
+}
+
+// MARK: - Minimap Waveform with auto Y-scale
+struct MinimapWaveform: View {
+    let samples: SampleBuffer
+    
+    var body: some View {
+        GeometryReader { geometry in
+            Canvas { context, size in
+                guard !samples.samples.isEmpty else { return }
+                
+                // Downsample for minimap (we don't need full resolution)
+                let targetSampleCount = min(Int(size.width * 2), samples.samples.count)
+                let step = max(1, samples.samples.count / targetSampleCount)
+                var displaySamples: [Float] = []
+                
+                for i in stride(from: 0, to: samples.samples.count, by: step) {
+                    // Take max of the chunk for better visualization
+                    let endIndex = min(i + step, samples.samples.count)
+                    let chunk = samples.samples[i..<endIndex]
+                    let maxValue = chunk.map { abs($0) }.max() ?? 0
+                    displaySamples.append(maxValue)
+                }
+                
+                // Find max amplitude for auto-scaling
+                let maxAmplitude = displaySamples.max() ?? 1.0
+                let scale = maxAmplitude > 0 ? 0.9 / maxAmplitude : 1.0
+                
+                let midY = size.height / 2
+                let sampleStep = size.width / CGFloat(displaySamples.count - 1)
+                
+                // Create waveform path
+                var path = Path()
+                
+                for i in displaySamples.indices {
+                    let x = CGFloat(i) * sampleStep
+                    let amplitude = CGFloat(displaySamples[i]) * CGFloat(scale) * midY
+                    
+                    // Draw vertical line for each sample
+                    path.move(to: CGPoint(x: x, y: midY - amplitude))
+                    path.addLine(to: CGPoint(x: x, y: midY + amplitude))
+                }
+                
+                context.stroke(path, with: .color(.gray.opacity(0.7)), lineWidth: 0.5)
+            }
+        }
     }
 }
 
@@ -627,8 +965,11 @@ struct MinimapView: View {
     @ObservedObject var viewModel: EnhancedAudioViewModel
     @State private var isDraggingLeft = false
     @State private var isDraggingRight = false
+    @State private var isDraggingIndicator = false
     @State private var dragStartZoom: Double = 1.0
     @State private var dragStartOffset: Double = 0.0
+    @State private var dragStartIndicatorOffset: Double = -1.0
+    @State private var dragStartIndicatorWidth: CGFloat = 0
     
     var body: some View {
         GeometryReader { geometry in
@@ -642,16 +983,43 @@ struct MinimapView: View {
                             .fill(Color.gray.opacity(0.1))
                         
                         if let buffer = viewModel.sampleBuffer {
-                            Waveform(samples: buffer)
+                            MinimapWaveform(samples: buffer)
                                 .foregroundColor(.gray.opacity(0.7))
                                 .allowsHitTesting(false)
                         }
+                        
+                        // Draw transient markers
+                        Canvas { context, size in
+                            for marker in viewModel.markers {
+                                // Calculate position relative to entire file
+                                let markerPosition = Double(marker.samplePosition) / Double(viewModel.totalSamples)
+                                let x = markerPosition * size.width
+                                
+                                var markerLine = Path()
+                                markerLine.move(to: CGPoint(x: x, y: 0))
+                                markerLine.addLine(to: CGPoint(x: x, y: size.height))
+                                
+                                let color: Color = marker.group == nil ? .red.opacity(0.5) : .green.opacity(0.5)
+                                context.stroke(markerLine, with: .color(color), lineWidth: 0.5)
+                            }
+                        }
+                        .allowsHitTesting(false)
                         
                         let indicatorWidth = max(20, width / CGFloat(viewModel.zoomLevel))
                         // With this
                         let indicatorOffset = CGFloat(viewModel.scrollOffset) * width
                                             + indicatorWidth / 2                 // move to the bar’s centre
                                             - width / 2                          // shift because the ZStack is centred
+                        
+                        // Calculate adaptive edge zone size
+                        let indicatorRatio = indicatorWidth / width
+                        let edgeZoneWidth: CGFloat = {
+                            if indicatorRatio < 0.1 {  // Less than 10% of minimap width
+                                return min(4, indicatorWidth * 0.3)  // Even smaller edge zones
+                            } else {
+                                return 8  // Default edge zone width
+                            }
+                        }()
                         
                         // Zoom indicator with edge handles
                         ZStack {
@@ -663,9 +1031,9 @@ struct MinimapView: View {
                             // Left edge handle
                             Rectangle()
                                 .fill(Color.blue.opacity(0.001))  // Nearly invisible but still interactive
-                                .frame(width: 20, height: geometry.size.height)  // Wider for easier grabbing
+                                .frame(width: edgeZoneWidth, height: geometry.size.height)
                                 .contentShape(Rectangle())
-                                .offset(x: -indicatorWidth/2 + 10)
+                                .offset(x: -indicatorWidth/2 + edgeZoneWidth/2)
                                 .cursor(NSCursor.resizeLeftRight)
                                 .highPriorityGesture(
                                     DragGesture(minimumDistance: 1)
@@ -674,8 +1042,9 @@ struct MinimapView: View {
                                                 isDraggingLeft = true
                                                 dragStartZoom = viewModel.zoomLevel
                                                 dragStartOffset = viewModel.scrollOffset
+                                                dragStartIndicatorWidth = indicatorWidth
                                             }
-                                            handleLeftEdgeDrag(value: value, width: width, indicatorWidth: indicatorWidth)
+                                            handleLeftEdgeDrag(value: value, width: width)
                                         }
                                         .onEnded { _ in
                                             isDraggingLeft = false
@@ -685,9 +1054,9 @@ struct MinimapView: View {
                             // Right edge handle
                             Rectangle()
                                 .fill(Color.blue.opacity(0.001))  // Nearly invisible but still interactive
-                                .frame(width: 20, height: geometry.size.height)  // Wider for easier grabbing
+                                .frame(width: edgeZoneWidth, height: geometry.size.height)
                                 .contentShape(Rectangle())
-                                .offset(x: indicatorWidth/2 - 10)
+                                .offset(x: indicatorWidth/2 - edgeZoneWidth/2)
                                 .cursor(NSCursor.resizeLeftRight)
                                 .highPriorityGesture(
                                     DragGesture(minimumDistance: 1)
@@ -696,8 +1065,9 @@ struct MinimapView: View {
                                                 isDraggingRight = true
                                                 dragStartZoom = viewModel.zoomLevel
                                                 dragStartOffset = viewModel.scrollOffset
+                                                dragStartIndicatorWidth = indicatorWidth
                                             }
-                                            handleRightEdgeDrag(value: value, width: width, indicatorWidth: indicatorWidth)
+                                            handleRightEdgeDrag(value: value, width: width)
                                         }
                                         .onEnded { _ in
                                             isDraggingRight = false
@@ -731,38 +1101,35 @@ struct MinimapView: View {
                     }
                 }
                 .gesture(
-                    DragGesture(minimumDistance: 5)
+                    DragGesture(minimumDistance: 0)
                         .onChanged { value in
                             // Only handle drag on the indicator itself, not edges
                             guard !isDraggingLeft && !isDraggingRight else { return }
+                            guard viewModel.zoomLevel > 1.0 else { return }
                             
-                            let indicatorWidth = width / CGFloat(viewModel.zoomLevel)
-                            let indicatorStart = CGFloat(viewModel.scrollOffset) * width
-                            let indicatorEnd = indicatorStart + indicatorWidth
-                            
-                            // Check if drag started within the indicator (but not on edges)
-                            let startX = value.startLocation.x
-                            let edgeThreshold: CGFloat = 15
-                            
-                            if startX >= indicatorStart + edgeThreshold && 
-                               startX <= indicatorEnd - edgeThreshold {
-                                // Drag the indicator
-                                guard viewModel.zoomLevel > 1.0 else { return }
-                                
-                                let dragDelta = value.translation.width / width
-                                let newOffset = viewModel.scrollOffset + Double(dragDelta) / viewModel.zoomLevel
-                                let maxScrollOffset = 1.0 - (1.0 / viewModel.zoomLevel)
-                                viewModel.scrollOffset = max(0, min(maxScrollOffset, newOffset))
+                            // Initialize on first drag
+                            if !isDraggingIndicator {
+                                isDraggingIndicator = true
+                                dragStartIndicatorOffset = viewModel.scrollOffset
                             }
+                            
+                            // Apply drag movement
+                            let dragDelta = value.translation.width / width
+                            let newOffset = dragStartIndicatorOffset + Double(dragDelta)
+                            let maxScrollOffset = 1.0 - (1.0 / viewModel.zoomLevel)
+                            viewModel.scrollOffset = max(0, min(maxScrollOffset, newOffset))
+                        }
+                        .onEnded { _ in
+                            dragStartIndicatorOffset = -1
+                            isDraggingIndicator = false
                         }
                 )
         }
         .frame(height: 60)
     }
     
-    private func handleLeftEdgeDrag(value: DragGesture.Value, width: CGFloat, indicatorWidth: CGFloat) {
-        let delta = value.translation.width / width
-        let newIndicatorWidth = max(20, indicatorWidth - value.translation.width)
+    private func handleLeftEdgeDrag(value: DragGesture.Value, width: CGFloat) {
+        let newIndicatorWidth = max(20, dragStartIndicatorWidth - value.translation.width)
         let newZoom = width / newIndicatorWidth
         
         if newZoom >= 1.0 && newZoom <= 500.0 {
@@ -773,8 +1140,8 @@ struct MinimapView: View {
         }
     }
     
-    private func handleRightEdgeDrag(value: DragGesture.Value, width: CGFloat, indicatorWidth: CGFloat) {
-        let newIndicatorWidth = max(20, indicatorWidth + value.translation.width)
+    private func handleRightEdgeDrag(value: DragGesture.Value, width: CGFloat) {
+        let newIndicatorWidth = max(20, dragStartIndicatorWidth + value.translation.width)
         let newZoom = width / newIndicatorWidth
         
         if newZoom >= 1.0 && newZoom <= 500.0 {
@@ -835,6 +1202,29 @@ struct WaveformControls: View {
                 .frame(width: 200)
                 .disabled(viewModel.sampleBuffer == nil)
                 Text(String(format: "%.2f", viewModel.transientThreshold))
+                    .frame(width: 50)
+            }
+            
+            // Transient offset controls
+            HStack {
+                Text("Transient Offset (ms):")
+                Slider(
+                    value: Binding(
+                        get: { viewModel.transientOffsetMs },
+                        set: { newValue in
+                            let oldValue = viewModel.transientOffsetMs
+                            viewModel.transientOffsetMs = newValue
+                            // If we have detected transients, update their positions
+                            if viewModel.hasDetectedTransients {
+                                viewModel.updateTransientOffsets(oldOffset: oldValue, newOffset: newValue)
+                            }
+                        }
+                    ),
+                    in: 0...20.0
+                )
+                .frame(width: 200)
+                .disabled(viewModel.sampleBuffer == nil)
+                Text(String(format: "%.1f ms", viewModel.transientOffsetMs))
                     .frame(width: 50)
             }
         }

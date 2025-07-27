@@ -7,6 +7,7 @@ struct Marker: Identifiable, Hashable {
     let id = UUID()
     var samplePosition: Int          // Exact sample index in the original file
     var group: Int? = nil            // Optional group number, assigned via drag-selection
+    var customEndPosition: Int? = nil // Optional custom end position (overrides auto-detection)
 }
 
 // MARK: - Sample and Velocity Layer Models
@@ -137,9 +138,9 @@ func generatePianoKeys() -> [PianoKey] {
     var keys: [PianoKey] = []
     let noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
     
-    let whiteKeyWidth: CGFloat = 30
-    let blackKeyWidth: CGFloat = 18
-    let whiteKeyHeight: CGFloat = 150
+    let whiteKeyWidth: CGFloat = 15  // Halved from 30
+    let blackKeyWidth: CGFloat = 9   // Halved from 18
+    let whiteKeyHeight: CGFloat = 75  // Halved from 150
     let blackKeyHeight: CGFloat = whiteKeyHeight * 0.6
     
     // Generate Key Data

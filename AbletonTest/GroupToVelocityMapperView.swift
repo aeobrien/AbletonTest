@@ -10,6 +10,10 @@ struct GroupToVelocityMapperView: View {
     @State private var selectedGroups: Set<Int> = []
     @State private var targetKeyId: Int?
     @State private var splitMode: VelocitySplitMode = .separate
+    @State private var isPitchedMode = false
+    @State private var keyRangeMin = 0
+    @State private var keyRangeMax = 127
+    @State private var rootKey = 60
     
     // Group the markers by their group ID
     var markerGroups: [TransientGroup] {
@@ -77,36 +81,107 @@ struct GroupToVelocityMapperView: View {
                 
                 Divider()
                 
-                // Target key selection
+                // Mapping mode selection
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Target Key:")
+                    Text("Mapping Mode:")
                         .font(.headline)
                     
-                    HStack {
-                        if let selectedKey = targetKeyId {
-                            Text(noteNameForMIDI(selectedKey))
-                                .font(.title3)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background(Color.blue.opacity(0.2))
-                                .cornerRadius(6)
+                    Picker("", selection: $isPitchedMode) {
+                        Text("Single Key").tag(false)
+                        Text("Pitched Range").tag(true)
+                    }
+                    .pickerStyle(SegmentedPickerStyle())
+                    .onChange(of: isPitchedMode) { _ in
+                        if isPitchedMode && targetKeyId != nil {
+                            // Set default root key to current target
+                            rootKey = targetKeyId!
+                            keyRangeMin = max(0, targetKeyId! - 12)
+                            keyRangeMax = min(127, targetKeyId! + 12)
+                        }
+                    }
+                }
+                
+                Divider()
+                
+                // Target key or range selection
+                if !isPitchedMode {
+                    // Single key mode
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Target Key:")
+                            .font(.headline)
+                        
+                        HStack {
+                            if let selectedKey = targetKeyId {
+                                Text(noteNameForMIDI(selectedKey))
+                                    .font(.title3)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    .background(Color.blue.opacity(0.2))
+                                    .cornerRadius(6)
+                            }
+                            
+                            Menu {
+                                ForEach(createNoteOptions(), id: \.0) { note, name in
+                                    Button(name) {
+                                        targetKeyId = note
+                                    }
+                                }
+                            } label: {
+                                Label(targetKeyId == nil ? "Select Note" : "Change Note", 
+                                      systemImage: "piano")
+                            }
+                            .menuStyle(.borderlessButton)
                         }
                         
-                        Menu {
-                            ForEach(createNoteOptions(), id: \.0) { note, name in
-                                Button(name) {
-                                    targetKeyId = note
+                        if targetKeyId == nil {
+                            Text("Select a target note from the menu above")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                } else {
+                    // Pitched range mode
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Key Range & Root:")
+                            .font(.headline)
+                        
+                        // Root key
+                        HStack {
+                            Text("Root Key:")
+                                .frame(width: 80, alignment: .leading)
+                            Picker("", selection: $rootKey) {
+                                ForEach(0...127, id: \.self) { note in
+                                    Text(noteNameForMIDI(note)).tag(note)
                                 }
                             }
-                        } label: {
-                            Label(targetKeyId == nil ? "Select Note" : "Change Note", 
-                                  systemImage: "piano")
+                            .frame(width: 100)
                         }
-                        .menuStyle(.borderlessButton)
-                    }
-                    
-                    if targetKeyId == nil {
-                        Text("Select a target note from the menu above")
+                        .help("The original pitch of the samples")
+                        
+                        // Key range
+                        HStack {
+                            Text("Range:")
+                                .frame(width: 80, alignment: .leading)
+                            
+                            Picker("", selection: $keyRangeMin) {
+                                ForEach(0...keyRangeMax, id: \.self) { note in
+                                    Text(noteNameForMIDI(note)).tag(note)
+                                }
+                            }
+                            .frame(width: 80)
+                            
+                            Text("to")
+                            
+                            Picker("", selection: $keyRangeMax) {
+                                ForEach(keyRangeMin...127, id: \.self) { note in
+                                    Text(noteNameForMIDI(note)).tag(note)
+                                }
+                            }
+                            .frame(width: 80)
+                        }
+                        .help("The range of keys that will trigger these samples")
+                        
+                        Text("Samples will be pitched up/down from root key")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -141,7 +216,7 @@ struct GroupToVelocityMapperView: View {
                     performMapping()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(selectedGroups.isEmpty || targetKeyId == nil)
+                .disabled(selectedGroups.isEmpty || (!isPitchedMode && targetKeyId == nil))
             }
         }
         .padding()
@@ -149,14 +224,26 @@ struct GroupToVelocityMapperView: View {
     }
     
     private func performMapping() {
-        guard let keyId = targetKeyId else { return }
-        
         let groupsToMap = markerGroups.filter { selectedGroups.contains($0.id) }
-        samplerViewModel.mapTransientGroupsToVelocityLayers(
-            groups: groupsToMap,
-            toKey: keyId,
-            splitMode: splitMode
-        )
+        
+        if isPitchedMode {
+            // Map to pitched range
+            samplerViewModel.mapTransientGroupsToPitchedRange(
+                groups: groupsToMap,
+                keyRangeMin: keyRangeMin,
+                keyRangeMax: keyRangeMax,
+                rootKey: rootKey,
+                splitMode: splitMode
+            )
+        } else {
+            // Map to single key
+            guard let keyId = targetKeyId else { return }
+            samplerViewModel.mapTransientGroupsToVelocityLayers(
+                groups: groupsToMap,
+                toKey: keyId,
+                splitMode: splitMode
+            )
+        }
         
         dismiss()
     }
