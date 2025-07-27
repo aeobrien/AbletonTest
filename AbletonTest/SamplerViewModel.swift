@@ -432,7 +432,7 @@ class SamplerViewModel: ObservableObject {
         // Check if we have round robins (multiple samples with same key and velocity range)
         let hasRoundRobins = detectRoundRobins()
         let roundRobinValue = hasRoundRobins ? "true" : "false"
-        let roundRobinModeValue = "0" // 0 = cycle mode
+        let roundRobinModeValue = "2" // 2 = other mode
         let randomSeed = Int.random(in: 1...1000000000)
         
         return """
@@ -483,8 +483,110 @@ class SamplerViewModel: ObservableObject {
                     <Panorama><Manual Value="0" /></Panorama>
                 </VolumeAndPan>
                 <Globals>
-                    <NumVoices Value="32" />
-                    <Retrigger Value="false" />
+                    <NumVoices Value="\(voiceCountToMenuIndex(voiceCount: 24))" />
+                    <NumVoicesEnvTimeControl Value="false" />
+                    <RetriggerMode Value="false" />
+                    <ModulationResolution Value="2" />
+                    <SpreadAmount>
+                        <LomId Value="0" />
+                        <Manual Value="0" />
+                        <MidiControllerRange>
+                            <Min Value="0" />
+                            <Max Value="100" />
+                        </MidiControllerRange>
+                        <AutomationTarget Id="0">
+                            <LockEnvelope Value="0" />
+                        </AutomationTarget>
+                        <ModulationTarget Id="0">
+                            <LockEnvelope Value="0" />
+                        </ModulationTarget>
+                    </SpreadAmount>
+                    <KeyZoneShift>
+                        <LomId Value="0" />
+                        <Manual Value="0" />
+                        <MidiControllerRange>
+                            <Min Value="-48" />
+                            <Max Value="48" />
+                        </MidiControllerRange>
+                        <AutomationTarget Id="0">
+                            <LockEnvelope Value="0" />
+                        </AutomationTarget>
+                        <ModulationTarget Id="0">
+                            <LockEnvelope Value="0" />
+                        </ModulationTarget>
+                    </KeyZoneShift>
+                    <PortamentoMode>
+                        <LomId Value="0" />
+                        <Manual Value="0" />
+                        <AutomationTarget Id="0">
+                            <LockEnvelope Value="0" />
+                        </AutomationTarget>
+                        <MidiControllerRange>
+                            <Min Value="0" />
+                            <Max Value="2" />
+                        </MidiControllerRange>
+                    </PortamentoMode>
+                    <PortamentoTime>
+                        <LomId Value="0" />
+                        <Manual Value="50" />
+                        <MidiControllerRange>
+                            <Min Value="0.1000000015" />
+                            <Max Value="10000" />
+                        </MidiControllerRange>
+                        <AutomationTarget Id="0">
+                            <LockEnvelope Value="0" />
+                        </AutomationTarget>
+                        <ModulationTarget Id="0">
+                            <LockEnvelope Value="0" />
+                        </ModulationTarget>
+                    </PortamentoTime>
+                    <PitchBendRange Value="2" />
+                    <MpePitchBendRange Value="48" />
+                    <ScrollPosition Value="0" />
+                    <EnvScale>
+                        <EnvTime>
+                            <LomId Value="0" />
+                            <Manual Value="0" />
+                            <MidiControllerRange>
+                                <Min Value="-100" />
+                                <Max Value="100" />
+                            </MidiControllerRange>
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <ModulationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </ModulationTarget>
+                        </EnvTime>
+                        <EnvTimeKeyScale>
+                            <LomId Value="0" />
+                            <Manual Value="0" />
+                            <MidiControllerRange>
+                                <Min Value="-100" />
+                                <Max Value="100" />
+                            </MidiControllerRange>
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <ModulationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </ModulationTarget>
+                        </EnvTimeKeyScale>
+                        <EnvTimeIncludeAttack>
+                            <LomId Value="0" />
+                            <Manual Value="true" />
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <MidiCCOnOffThresholds>
+                                <Min Value="64" />
+                                <Max Value="127" />
+                            </MidiCCOnOffThresholds>
+                        </EnvTimeIncludeAttack>
+                    </EnvScale>
+                    <IsSimpler Value="false" />
+                    <PlaybackMode Value="0" />
+                    <LegacyMode Value="false" />
                 </Globals>
             </MultiSampler>
         </Ableton>
@@ -558,6 +660,19 @@ class SamplerViewModel: ObservableObject {
     }
     
     // MARK: - Helper Methods
+    
+    private func voiceCountToMenuIndex(voiceCount: Int) -> Int {
+        // Ableton's voice menu options: 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 32
+        let voiceOptions = [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 32]
+        
+        // Find the index of the voice count, default to 13 (24 voices) if not found
+        if let index = voiceOptions.firstIndex(of: voiceCount) {
+            return index
+        } else {
+            // Default to 24 voices (index 13)
+            return 13
+        }
+    }
     
     private func detectRoundRobins() -> Bool {
         // Group samples by key and velocity range

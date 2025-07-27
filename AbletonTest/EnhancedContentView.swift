@@ -13,6 +13,13 @@ private func endOfRegion(after marker: Marker, markers: [Marker], totalSamples: 
     return totalSamples
 }
 
+// MARK: - Outlier Detection
+struct OutlierInfo {
+    let outlierIndices: [Int]
+    let normalRange: ClosedRange<Int>
+    let suggestedTrimLength: Int
+}
+
 // MARK: - Enhanced View Model with AudioKit Waveform support
 @MainActor
 final class EnhancedAudioViewModel: ObservableObject {
@@ -45,6 +52,10 @@ final class EnhancedAudioViewModel: ObservableObject {
     // Transient inspection mode
     @Published var isInspectingTransients = false
     @Published var currentTransientIndex = 0
+    
+    // Outlier detection
+    @Published var showOutlierAlert = false
+    var pendingOutlierInfo: (groupNumber: Int, markersToAssign: [(index: Int, marker: Marker)], outlierInfo: OutlierInfo)?
     
     // Computed properties for visible range
     var visibleStart: Int {
@@ -140,8 +151,24 @@ final class EnhancedAudioViewModel: ObservableObject {
     func addMarker(atX x: CGFloat, inWidth width: CGFloat) {
         let sample = sampleIndex(for: x, in: width)
         print("Adding marker at x=\(x), width=\(width), sample=\(sample)")
-        markers.append(Marker(samplePosition: sample))
+        let newMarker = Marker(samplePosition: sample)
+        markers.append(newMarker)
+        // Add to transientMarkers if it's not assigned to a group
+        if newMarker.group == nil {
+            transientMarkers.insert(sample)
+        }
         print("Total markers now: \(markers.count)")
+        
+        // Check if this new marker affects the endpoint of the previous marker
+        let sortedMarkers = markers.sorted { $0.samplePosition < $1.samplePosition }
+        if let newIndex = sortedMarkers.firstIndex(where: { $0.id == newMarker.id }),
+           newIndex > 0 {
+            let previousMarker = sortedMarkers[newIndex - 1]
+            if let prevIndex = markers.firstIndex(where: { $0.id == previousMarker.id }) {
+                // Update the previous marker's endpoint (programmatically, not user action)
+                updateRegionEndpoint(markerIndex: prevIndex, newEndPosition: sample, isUserAction: false)
+            }
+        }
     }
     
     func findMarkerNearPosition(x: CGFloat, width: CGFloat, tolerance: CGFloat = 10) -> Int? {
@@ -158,7 +185,7 @@ final class EnhancedAudioViewModel: ObservableObject {
         guard index >= 0 && index < markers.count else { return }
         let newEndPosition = sampleIndex(for: x, in: width)
         let oldEndPosition = markers[index].customEndPosition
-        markers[index].customEndPosition = newEndPosition
+        updateRegionEndpoint(markerIndex: index, newEndPosition: newEndPosition, isUserAction: true)
         print("moveMarkerEndPosition - X: \(x), Width: \(width), Old end: \(String(describing: oldEndPosition)), New end: \(newEndPosition)")
         print("Visible range: \(visibleStart) to \(visibleStart + visibleLength), Zoom: \(zoomLevel)")
     }
@@ -166,6 +193,96 @@ final class EnhancedAudioViewModel: ObservableObject {
     func resetMarkerEndPosition(at index: Int) {
         guard index >= 0 && index < markers.count else { return }
         markers[index].customEndPosition = nil
+    }
+    
+    // MARK: Amplitude detection for region endpoint adjustment
+    private func adjustRegionEndpointIfNeeded(markerIndex: Int, newEndPosition: Int) {
+        guard let buffer = sampleBuffer,
+              markerIndex >= 0 && markerIndex < markers.count else { return }
+        
+        let marker = markers[markerIndex]
+        let startPosition = marker.samplePosition
+        
+        // Don't adjust if the region is too small
+        let regionLength = newEndPosition - startPosition
+        guard regionLength > 4410 else { return } // At least 100ms at 44.1kHz
+        
+        // Analyze the last 50ms of the region
+        let analysisWindowMs = 50.0
+        let sampleRate = 44100.0 // Assuming 44.1kHz
+        let analysisWindowSamples = Int(analysisWindowMs * sampleRate / 1000.0)
+        
+        let analysisStart = max(startPosition, newEndPosition - analysisWindowSamples)
+        let analysisEnd = min(newEndPosition, buffer.samples.count)
+        
+        guard analysisEnd > analysisStart else { return }
+        
+        // Calculate RMS in small windows to detect amplitude increase
+        let windowSize = 441 // 10ms windows
+        let numWindows = (analysisEnd - analysisStart) / windowSize
+        
+        guard numWindows >= 2 else { return }
+        
+        var windowRMS: [Float] = []
+        
+        for i in 0..<numWindows {
+            let windowStart = analysisStart + i * windowSize
+            let windowEnd = min(windowStart + windowSize, analysisEnd)
+            
+            var sum: Float = 0
+            for j in windowStart..<windowEnd {
+                let sample = buffer.samples[j]
+                sum += sample * sample
+            }
+            let rms = sqrt(sum / Float(windowEnd - windowStart))
+            windowRMS.append(rms)
+        }
+        
+        // Check if amplitude is increasing significantly at the end
+        guard windowRMS.count >= 2 else { return }
+        
+        let lastRMS = windowRMS.last!
+        let avgRMS = windowRMS.dropLast().reduce(0, +) / Float(windowRMS.count - 1)
+        
+        // If the last window is significantly louder than the average, we might be catching the next transient
+        let threshold: Float = 2.0 // Last window is 2x louder than average
+        
+        if lastRMS > avgRMS * threshold {
+            // Find where the amplitude started increasing
+            var cutoffIndex = windowRMS.count - 1
+            
+            // Walk backwards to find where amplitude started rising
+            for i in (1..<windowRMS.count).reversed() {
+                if windowRMS[i] <= avgRMS * 1.2 { // 20% above average
+                    cutoffIndex = i
+                    break
+                }
+            }
+            
+            // Adjust the endpoint
+            let samplesToTrim = (windowRMS.count - cutoffIndex) * windowSize
+            let adjustedEndPosition = newEndPosition - samplesToTrim
+            
+            // Ensure we don't trim too much
+            if adjustedEndPosition > startPosition + 2205 { // Keep at least 50ms
+                markers[markerIndex].customEndPosition = adjustedEndPosition
+                print("Adjusted region endpoint from \(newEndPosition) to \(adjustedEndPosition) (trimmed \(samplesToTrim) samples)")
+            }
+        }
+    }
+    
+    // This should be called whenever a region's endpoint is updated programmatically
+    func updateRegionEndpoint(markerIndex: Int, newEndPosition: Int, isUserAction: Bool = false) {
+        guard markerIndex >= 0 && markerIndex < markers.count else { return }
+        
+        if isUserAction {
+            // User explicitly set this endpoint, respect their choice
+            markers[markerIndex].customEndPosition = newEndPosition
+        } else {
+            // Programmatic update, check if adjustment is needed
+            markers[markerIndex].customEndPosition = newEndPosition
+            adjustRegionEndpointIfNeeded(markerIndex: markerIndex, newEndPosition: newEndPosition)
+        }
     }
     
     func deleteMarker(at index: Int) {
@@ -283,8 +400,32 @@ final class EnhancedAudioViewModel: ObservableObject {
         if autoAssignGroups {
             // Auto-assign to next available group
             let newGroup = (markers.compactMap { $0.group }.max() ?? 0) + 1
-            for i in markers.indices where range.contains(markers[i].samplePosition) {
-                markers[i].group = newGroup
+            
+            // Get the markers being assigned
+            let markersToAssign = markers.enumerated()
+                .filter { range.contains($0.element.samplePosition) }
+                .map { (index: $0.offset, marker: $0.element) }
+            
+            // Get existing markers in this group (which will be empty for a new group)
+            let existingGroupMarkers = markers.filter { $0.group == newGroup }
+            
+            // Combine for outlier detection
+            let allMarkersInGroup = markersToAssign.map { $0.marker } + existingGroupMarkers
+            
+            // Check for outliers
+            if let outlierInfo = detectRegionLengthOutliers(markers: allMarkersInGroup) {
+                // Store the info for the alert
+                pendingOutlierInfo = (
+                    groupNumber: newGroup,
+                    markersToAssign: markersToAssign,
+                    outlierInfo: outlierInfo
+                )
+                showOutlierAlert = true
+            } else {
+                // No outliers, proceed with assignment
+                for (index, _) in markersToAssign {
+                    markers[index].group = newGroup
+                }
             }
             // Keep selection visible for playback
             // tempSelection = nil  // Don't clear selection
@@ -321,12 +462,36 @@ final class EnhancedAudioViewModel: ObservableObject {
     
     func assignToGroup(_ groupNumber: Int) {
         guard let range = pendingGroupAssignment else { return }
-        for i in markers.indices where range.contains(markers[i].samplePosition) {
-            markers[i].group = groupNumber
+        
+        // Get the markers being assigned
+        let markersToAssign = markers.enumerated()
+            .filter { range.contains($0.element.samplePosition) }
+            .map { (index: $0.offset, marker: $0.element) }
+        
+        // Get existing markers in this group
+        let existingGroupMarkers = markers.filter { $0.group == groupNumber }
+        
+        // Combine for outlier detection
+        let allMarkersInGroup = markersToAssign.map { $0.marker } + existingGroupMarkers
+        
+        // Check for outliers
+        if let outlierInfo = detectRegionLengthOutliers(markers: allMarkersInGroup) {
+            // Store the info for the alert
+            pendingOutlierInfo = (
+                groupNumber: groupNumber,
+                markersToAssign: markersToAssign,
+                outlierInfo: outlierInfo
+            )
+            showOutlierAlert = true
+        } else {
+            // No outliers, proceed with assignment
+            for (index, _) in markersToAssign {
+                markers[index].group = groupNumber
+            }
+            pendingGroupAssignment = nil
+            tempSelection = nil
+            showGroupAssignmentMenu = false
         }
-        pendingGroupAssignment = nil
-        tempSelection = nil
-        showGroupAssignmentMenu = false
     }
     
     func assignIncrementally() {
@@ -351,6 +516,105 @@ final class EnhancedAudioViewModel: ObservableObject {
         for i in markers.indices where range.contains(markers[i].samplePosition) {
             markers[i].group = nil
         }
+        pendingGroupAssignment = nil
+        tempSelection = nil
+        showGroupAssignmentMenu = false
+    }
+    
+    // MARK: Outlier Detection
+    private func detectRegionLengthOutliers(markers: [Marker]) -> OutlierInfo? {
+        guard markers.count >= 3 else { return nil }
+        
+        // Calculate region lengths
+        let sortedMarkers = markers.sorted { $0.samplePosition < $1.samplePosition }
+        var regionLengths: [(index: Int, length: Int)] = []
+        
+        for i in 0..<sortedMarkers.count {
+            let endPosition = endOfRegion(after: sortedMarkers[i], 
+                                        markers: self.markers, 
+                                        totalSamples: totalSamples)
+            let length = endPosition - sortedMarkers[i].samplePosition
+            regionLengths.append((index: i, length: length))
+        }
+        
+        // Sort by length to find outliers
+        let sortedByLength = regionLengths.sorted { $0.length < $1.length }
+        
+        // Calculate median and IQR
+        let medianIndex = sortedByLength.count / 2
+        let q1Index = sortedByLength.count / 4
+        let q3Index = (sortedByLength.count * 3) / 4
+        
+        let median = sortedByLength[medianIndex].length
+        let q1 = sortedByLength[q1Index].length
+        let q3 = sortedByLength[q3Index].length
+        let iqr = q3 - q1
+        
+        // Define outlier threshold (1.5 * IQR method)
+        let upperBound = q3 + Int(1.5 * Double(iqr))
+        
+        // Find outliers
+        var outlierIndices: [Int] = []
+        for (originalIndex, length) in regionLengths {
+            if length > upperBound {
+                outlierIndices.append(originalIndex)
+            }
+        }
+        
+        // If we have outliers, calculate suggested trim length
+        guard !outlierIndices.isEmpty else { return nil }
+        
+        // Find the longest non-outlier region
+        let nonOutlierLengths = regionLengths
+            .filter { !outlierIndices.contains($0.index) }
+            .map { $0.length }
+        
+        guard let maxNormalLength = nonOutlierLengths.max() else { return nil }
+        
+        return OutlierInfo(
+            outlierIndices: outlierIndices,
+            normalRange: q1...q3,
+            suggestedTrimLength: maxNormalLength
+        )
+    }
+    
+    func confirmOutlierTrimming() {
+        guard let info = pendingOutlierInfo else { return }
+        
+        // Trim the outlier regions
+        for (index, marker) in info.markersToAssign {
+            // Check if this is an outlier
+            let markerPosition = marker.samplePosition
+            let sortedMarkers = markers.sorted { $0.samplePosition < $1.samplePosition }
+            if let sortedIndex = sortedMarkers.firstIndex(where: { $0.id == marker.id }),
+               info.outlierInfo.outlierIndices.contains(sortedIndex) {
+                // Trim this region to the suggested length
+                let newEndPosition = markerPosition + info.outlierInfo.suggestedTrimLength
+                updateRegionEndpoint(markerIndex: index, newEndPosition: newEndPosition, isUserAction: false)
+            }
+            // Assign to group
+            markers[index].group = info.groupNumber
+        }
+        
+        // Clear state
+        pendingOutlierInfo = nil
+        showOutlierAlert = false
+        pendingGroupAssignment = nil
+        tempSelection = nil
+        showGroupAssignmentMenu = false
+    }
+    
+    func cancelOutlierTrimming() {
+        guard let info = pendingOutlierInfo else { return }
+        
+        // Just assign without trimming
+        for (index, _) in info.markersToAssign {
+            markers[index].group = info.groupNumber
+        }
+        
+        // Clear state
+        pendingOutlierInfo = nil
+        showOutlierAlert = false
         pendingGroupAssignment = nil
         tempSelection = nil
         showGroupAssignmentMenu = false
@@ -523,6 +787,14 @@ final class EnhancedAudioViewModel: ObservableObject {
         
         // Sort markers by position
         markers.sort { $0.samplePosition < $1.samplePosition }
+        
+        // Apply amplitude detection to adjust endpoints programmatically
+        for i in 0..<markers.count - 1 {
+            if markers[i].group == nil { // Only for transient markers
+                let nextPosition = markers[i + 1].samplePosition
+                updateRegionEndpoint(markerIndex: i, newEndPosition: nextPosition, isUserAction: false)
+            }
+        }
     }
     
     func clearDetectedTransients() {
@@ -535,10 +807,29 @@ final class EnhancedAudioViewModel: ObservableObject {
     }
     
     func startTransientInspection() {
-        guard !transientMarkers.isEmpty else { return }
+        // Include ALL markers
+        guard !markers.isEmpty else { return }
+        
+        print("DEBUG: Starting inspection with \(markers.count) total markers")
+        
         isInspectingTransients = true
-        currentTransientIndex = 0
-        focusOnTransient(at: currentTransientIndex)
+        
+        // Ensure we have a valid current index
+        if currentTransientIndex >= markers.count {
+            currentTransientIndex = 0
+        }
+        
+        // Force view update and then focus on the transient
+        objectWillChange.send()
+        
+        // Add a small delay to ensure SwiftUI has processed the state change
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self = self else { return }
+            print("DEBUG: Focusing on transient at index \(self.currentTransientIndex)")
+            self.focusOnTransient(at: self.currentTransientIndex)
+            // Force another update after focusing
+            self.objectWillChange.send()
+        }
     }
     
     func stopTransientInspection() {
@@ -546,6 +837,7 @@ final class EnhancedAudioViewModel: ObservableObject {
         // Zoom out to show entire file
         zoomLevel = 1.0
         scrollOffset = 0.0
+        // Keep currentTransientIndex so we can resume where we left off
     }
     
     func mergeWithNextRegion() {
@@ -587,36 +879,34 @@ final class EnhancedAudioViewModel: ObservableObject {
     }
     
     func nextTransient() {
-        let sortedTransients = Array(transientMarkers).sorted()
-        guard !sortedTransients.isEmpty else { return }
-        currentTransientIndex = (currentTransientIndex + 1) % sortedTransients.count
+        guard !markers.isEmpty else { return }
+        currentTransientIndex = (currentTransientIndex + 1) % markers.count
         focusOnTransient(at: currentTransientIndex)
     }
     
     func previousTransient() {
-        let sortedTransients = Array(transientMarkers).sorted()
-        guard !sortedTransients.isEmpty else { return }
-        currentTransientIndex = (currentTransientIndex - 1 + sortedTransients.count) % sortedTransients.count
+        guard !markers.isEmpty else { return }
+        currentTransientIndex = (currentTransientIndex - 1 + markers.count) % markers.count
         focusOnTransient(at: currentTransientIndex)
     }
     
     private func focusOnTransient(at index: Int) {
-        // Get actual transient markers from the markers array (those without groups)
-        let transientMarkers = markers.filter { $0.group == nil }.sorted { $0.samplePosition < $1.samplePosition }
-        guard index >= 0 && index < transientMarkers.count else { return }
+        // Get all markers sorted by position
+        let allMarkersSorted = markers.sorted { $0.samplePosition < $1.samplePosition }
+        guard index >= 0 && index < allMarkersSorted.count else { return }
         
-        let currentMarker = transientMarkers[index]
+        let currentMarker = allMarkersSorted[index]
         let transientPosition = currentMarker.samplePosition
         
         print("focusOnTransient - index: \(index), transientPosition: \(transientPosition)")
-        print("Actual marker positions: \(transientMarkers.map { $0.samplePosition })")
+        print("Actual marker positions: \(allMarkersSorted.map { $0.samplePosition })")
         
         // Find the end position (next transient or end of file)
         let endPosition: Int
         if let customEnd = currentMarker.customEndPosition {
             endPosition = customEnd
-        } else if index < transientMarkers.count - 1 {
-            endPosition = transientMarkers[index + 1].samplePosition
+        } else if index < allMarkersSorted.count - 1 {
+            endPosition = allMarkersSorted[index + 1].samplePosition
         } else {
             endPosition = totalSamples
         }
@@ -859,12 +1149,17 @@ struct EnhancedWaveformView: View {
                                 // Draw markers or focused region
                                 if viewModel.isInspectingTransients {
                                     // In inspection mode, show current and next regions
-                                    let sortedTransients = Array(viewModel.transientMarkers).sorted()
+                                    // Include ALL markers (both with and without groups)
+                                    let allMarkersSorted = viewModel.markers
+                                        .sorted { $0.samplePosition < $1.samplePosition }
+                                    
+                                    print("DEBUG: Inspection mode - found \(allMarkersSorted.count) total markers")
+                                    print("DEBUG: currentTransientIndex = \(viewModel.currentTransientIndex)")
                                     
                                     // Next region
                                     let nextIndex = viewModel.currentTransientIndex + 1
-                                    if nextIndex < sortedTransients.count,
-                                       let nextMarker = viewModel.markers.first(where: { $0.samplePosition == sortedTransients[nextIndex] }) {
+                                    if nextIndex < allMarkersSorted.count {
+                                        let nextMarker = allMarkersSorted[nextIndex]
 
                                         let nextEndPosition = endOfRegion(after: nextMarker,
                                                                           markers: viewModel.markers,
@@ -892,15 +1187,21 @@ struct EnhancedWaveformView: View {
                                     
                                     // Current region
                                     if viewModel.currentTransientIndex >= 0,
-                                       viewModel.currentTransientIndex < sortedTransients.count,
-                                       let marker = viewModel.markers.first(where: { $0.samplePosition == sortedTransients[viewModel.currentTransientIndex] }) {
+                                       viewModel.currentTransientIndex < allMarkersSorted.count {
+                                        let marker = allMarkersSorted[viewModel.currentTransientIndex]
+                                        
+                                        print("DEBUG: Drawing current region for marker at position \(marker.samplePosition)")
 
                                         let endPosition = endOfRegion(after: marker,
                                                                       markers: viewModel.markers,
                                                                       totalSamples: viewModel.totalSamples)
+                                        
+                                        print("DEBUG: Region from \(marker.samplePosition) to \(endPosition)")
 
                                         let startX = viewModel.xPosition(for: marker.samplePosition, in: size.width)
                                         let endX   = viewModel.xPosition(for: endPosition,          in: size.width)
+                                        
+                                        print("DEBUG: Drawing positions - startX: \(startX), endX: \(endX), width: \(size.width)")
 
                                         if startX <= size.width && endX >= 0 {
                                             let x = max(0, startX)

@@ -89,36 +89,18 @@ struct ContentView: View {
                     VStack(spacing: 0) {
                         // Marker handles above waveform
                         GeometryReader { geometry in
-                            if audioViewModel.isInspectingTransients {
-                                // In inspection mode, only show current region handles
-                                // Get all transient markers (those without groups) sorted by position
-                                let transientMarkerIndices = audioViewModel.markers.enumerated()
-                                    .filter { $0.element.group == nil }
-                                    .sorted { $0.element.samplePosition < $1.element.samplePosition }
-                                    .map { $0.offset }
+                            // Always show handles for all markers
+                            ForEach(audioViewModel.markers.indices, id: \.self) { index in
+                                MarkerHandle(
+                                    marker: audioViewModel.markers[index],
+                                    markerIndex: index,
+                                    geometry: geometry,
+                                    audioViewModel: audioViewModel
+                                )
                                 
-                                if audioViewModel.currentTransientIndex >= 0 && audioViewModel.currentTransientIndex < transientMarkerIndices.count {
-                                    let markerIndex = transientMarkerIndices[audioViewModel.currentTransientIndex]
-                                    
-                                    MarkerHandle(
-                                        marker: audioViewModel.markers[markerIndex],
-                                        markerIndex: markerIndex,
-                                        geometry: geometry,
-                                        audioViewModel: audioViewModel
-                                    )
-                                    
-                                    // End handle for the current region
+                                // Show end handles in inspection mode
+                                if audioViewModel.isInspectingTransients {
                                     RegionEndHandle(
-                                        marker: audioViewModel.markers[markerIndex],
-                                        markerIndex: markerIndex,
-                                        geometry: geometry,
-                                        audioViewModel: audioViewModel
-                                    )
-                                }
-                            } else {
-                                // Normal mode - show all handles
-                                ForEach(audioViewModel.markers.indices, id: \.self) { index in
-                                    MarkerHandle(
                                         marker: audioViewModel.markers[index],
                                         markerIndex: index,
                                         geometry: geometry,
@@ -134,48 +116,27 @@ struct ContentView: View {
                         
                         // Marker play buttons below waveform
                         GeometryReader { geometry in
-                            if audioViewModel.isInspectingTransients {
-                                // In inspection mode, only show play button for current region
-                                // Get all transient markers (those without groups) sorted by position
-                                let transientMarkerIndices = audioViewModel.markers.enumerated()
-                                    .filter { $0.element.group == nil }
-                                    .sorted { $0.element.samplePosition < $1.element.samplePosition }
-                                    .map { $0.offset }
+                            // Always show play buttons for all markers
+                            ForEach(audioViewModel.markers) { marker in
+                                let x = audioViewModel.xPosition(for: marker.samplePosition, in: geometry.size.width)
                                 
-                                if audioViewModel.currentTransientIndex >= 0 && audioViewModel.currentTransientIndex < transientMarkerIndices.count {
-                                    let markerIndex = transientMarkerIndices[audioViewModel.currentTransientIndex]
-                                    let marker = audioViewModel.markers[markerIndex]
-                                    let x = audioViewModel.xPosition(for: marker.samplePosition, in: geometry.size.width)
+                                // Only show if marker is visible
+                                if x >= 0 && x <= geometry.size.width {
+                                    // Check if this is the current marker in inspection mode
+                                    let isCurrentInspectedMarker = audioViewModel.isInspectingTransients && 
+                                        audioViewModel.currentTransientIndex >= 0 &&
+                                        audioViewModel.currentTransientIndex < audioViewModel.markers.count &&
+                                        audioViewModel.markers.sorted { $0.samplePosition < $1.samplePosition }[audioViewModel.currentTransientIndex].id == marker.id
                                     
-                                    if x >= 0 && x <= geometry.size.width {
-                                        Button(action: {
-                                            audioViewModel.playMarkerRegion(marker: marker)
-                                        }) {
-                                            Image(systemName: "play.circle.fill")
-                                                .font(.system(size: 16))
-                                                .foregroundColor(.purple)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .position(x: x, y: 6)
+                                    Button(action: {
+                                        audioViewModel.playMarkerRegion(marker: marker)
+                                    }) {
+                                        Image(systemName: "play.circle.fill")
+                                            .font(.system(size: 16))
+                                            .foregroundColor(isCurrentInspectedMarker ? .purple : (marker.group == nil ? .red : .green))
                                     }
-                                }
-                            } else {
-                                // Normal mode - show all play buttons
-                                ForEach(audioViewModel.markers) { marker in
-                                    let x = audioViewModel.xPosition(for: marker.samplePosition, in: geometry.size.width)
-                                    
-                                    // Only show if marker is visible
-                                    if x >= 0 && x <= geometry.size.width {
-                                        Button(action: {
-                                            audioViewModel.playMarkerRegion(marker: marker)
-                                        }) {
-                                            Image(systemName: "play.circle.fill")
-                                                .font(.system(size: 16))
-                                                .foregroundColor(marker.group == nil ? .red : .green)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .position(x: x, y: 6)
-                                    }
+                                    .buttonStyle(.plain)
+                                    .position(x: x, y: 6)
                                 }
                             }
                         }
@@ -302,7 +263,7 @@ struct ContentView: View {
                             .buttonStyle(.borderedProminent)
                             .disabled(audioViewModel.sampleBuffer == nil)
                             
-                            if audioViewModel.hasDetectedTransients && !audioViewModel.isInspectingTransients {
+                            if !audioViewModel.markers.isEmpty && !audioViewModel.isInspectingTransients {
                                 Button(action: {
                                     audioViewModel.startTransientInspection()
                                 }) {
@@ -333,7 +294,7 @@ struct ContentView: View {
                                         Image(systemName: "chevron.left")
                                     }
                                     
-                                    Text("\(audioViewModel.currentTransientIndex + 1)/\(audioViewModel.transientMarkers.count)")
+                                    Text("\(audioViewModel.currentTransientIndex + 1)/\(audioViewModel.markers.count)")
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                     
@@ -344,7 +305,7 @@ struct ContentView: View {
                                     }
                                     
                                     // Merge with next button
-                                    if audioViewModel.currentTransientIndex < audioViewModel.transientMarkers.count - 1 {
+                                    if audioViewModel.currentTransientIndex < audioViewModel.markers.count - 1 {
                                         Divider()
                                             .frame(height: 20)
                                         
@@ -463,6 +424,20 @@ struct ContentView: View {
         }
         .popover(isPresented: $audioViewModel.showGroupAssignmentMenu) {
             GroupAssignmentPopover(audioViewModel: audioViewModel)
+        }
+        .alert("Region Length Outliers Detected", isPresented: $audioViewModel.showOutlierAlert) {
+            Button("Trim to Match") {
+                audioViewModel.confirmOutlierTrimming()
+            }
+            Button("Keep Original Lengths", role: .cancel) {
+                audioViewModel.cancelOutlierTrimming()
+            }
+        } message: {
+            if let info = audioViewModel.pendingOutlierInfo {
+                let outlierCount = info.outlierInfo.outlierIndices.count
+                let normalLengthSeconds = Double(info.outlierInfo.suggestedTrimLength) / 44100.0
+                Text("\(outlierCount) region\(outlierCount == 1 ? " is" : "s are") significantly longer than the others. The typical regions are \(String(format: "%.1f", normalLengthSeconds)) seconds or shorter. Would you like to automatically trim the longer regions to match?")
+            }
         }
     }
     

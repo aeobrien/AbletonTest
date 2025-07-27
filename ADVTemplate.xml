@@ -152,6 +152,8 @@
 				<!-- Global Sample/Zone Settings -->
 				<LoadInRam Value="true" /> <!-- Sample Tab -> RAM button (On/Off) -->
 				<RoundRobin Value="true" /> <!-- Zone Tab -> RR (Round Robin) button (On/Off) -->
+				<!-- RoundRobinMode: 0=Cycle, 1=Random, 2=Other -->
+				<RoundRobinMode Value="2" /> <!-- Zone Tab -> RR Mode dropdown -->
 			</MultiSampleMap>
 
 			<!-- Sample Tab -> Global settings -->
@@ -441,7 +443,12 @@
 		<!-- GLOBALS SECTION (VARIOUS TABS)                                                  -->
 		<!-- =============================================================================== -->
 		<Globals>
-			<NumVoices Value="32" /> <!-- Filter/Global Tab -> Voices (1-64) -->
+			<!-- NumVoices is the menu index, NOT the actual voice count! -->
+			<!-- Menu options: 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 32 -->
+			<!-- Index:       0  1  2  3  4  5  6  7   8   9  10  11  12  13  14 -->
+			<!-- Example: Value="13" = 24 voices, Value="14" = 32 voices, Value="4" = 5 voices -->
+			<NumVoices Value="13" /> <!-- Filter/Global Tab -> Voices menu index -->
+			<NumVoicesEnvTimeControl Value="false" /> <!-- Controls whether envelope time is affected by voice count -->
 			<RetriggerMode Value="false" /> <!-- Filter/Global Tab -> Retrigger button (R) next to Voices count. -->
 			<SpreadAmount> <Manual Value="0" /> </SpreadAmount>     <!-- Pitch/Osc Tab -> Spread (0-100%) -->
 			<KeyZoneShift> <Manual Value="0" /> </KeyZoneShift>     <!-- Pitch/Osc Tab -> Zn Shft (-48 to 48 st) -->
