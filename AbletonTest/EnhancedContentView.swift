@@ -64,6 +64,7 @@ final class EnhancedAudioViewModel: ObservableObject {
     @Published var hasDetectedTransients = false
     @Published var showTransientMarkers = true
     @Published var selectedDetectionAlgorithm: TransientDetectionAlgorithm = .multiscaleTimeDomain
+    @Published var isDetectingTransients = false
     
     // Transient inspection mode
     @Published var isInspectingTransients = false
@@ -85,6 +86,13 @@ final class EnhancedAudioViewModel: ObservableObject {
     var visibleLength: Int {
         let length = Int(Double(totalSamples) / zoomLevel)
         return min(length, totalSamples - visibleStart)
+    }
+    
+    // Group the markers by their group ID
+    var markerGroups: [TransientGroup] {
+        let groupedMarkers = Dictionary(grouping: markers.filter { $0.group != nil }, by: { $0.group! })
+        return groupedMarkers.map { TransientGroup(id: $0.key, markers: $0.value) }
+            .sorted { $0.id < $1.id }
     }
     
     var audioURL: URL?
@@ -779,18 +787,27 @@ final class EnhancedAudioViewModel: ObservableObject {
     
     // MARK: Transient Detection
     func detectTransients() {
-        print("=== TRANSIENT DETECTION START ===")
-        print("Using algorithm: \(selectedDetectionAlgorithm.displayName)")
-        guard let buffer = sampleBuffer else {
-            print("No sample buffer available")
-            return
-        }
-        
-        transientMarkers.removeAll()
+        Task { @MainActor in
+            print("=== TRANSIENT DETECTION START ===")
+            print("Using algorithm: \(selectedDetectionAlgorithm.displayName)")
+            guard let buffer = sampleBuffer else {
+                print("No sample buffer available")
+                return
+            }
+            
+            // Set detecting flag
+            isDetectingTransients = true
+            
+            // Give UI time to update
+            try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+            
+            // Clear existing markers
+            transientMarkers.removeAll()
         let samples = buffer.samples
         print("Total samples: \(samples.count)")
         guard samples.count > 10 else {
             print("Not enough samples")
+            isDetectingTransients = false
             return
         }
         
@@ -846,6 +863,10 @@ final class EnhancedAudioViewModel: ObservableObject {
         
         // Update markers to include transients
         updateMarkersWithTransients()
+        
+        // Clear detecting flag
+        isDetectingTransients = false
+        }
     }
     
     // MARK: Energy-based transient detection (original algorithm)
