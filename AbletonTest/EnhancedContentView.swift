@@ -2,6 +2,7 @@ import SwiftUI
 import AVFoundation
 import UniformTypeIdentifiers
 import AppKit
+import Accelerate
 
 // Compute the end sample of the region starting at `marker`
 private func endOfRegion(after marker: Marker, markers: [Marker], totalSamples: Int) -> Int {
@@ -11,6 +12,17 @@ private func endOfRegion(after marker: Marker, markers: [Marker], totalSamples: 
         return sorted[idx + 1].samplePosition
     }
     return totalSamples
+}
+
+// MARK: - Transient Detection Algorithm
+enum TransientDetectionAlgorithm: String, CaseIterable {
+    case energy = "Energy"
+    case superFlux = "SuperFlux++"
+    case IRCAM = "IRCAM-style"
+    case multiscaleTimeDomain = "Multiscale Time-Domain"
+
+    
+    var displayName: String { self.rawValue }
 }
 
 // MARK: - Outlier Detection
@@ -26,6 +38,8 @@ final class EnhancedAudioViewModel: ObservableObject {
     // Audio data
     @Published var sampleBuffer: SampleBuffer?
     @Published var totalSamples: Int = 0
+    
+    @Published var sampleRate: Double = 44100.0
     
     // Markers and selection
     @Published var markers: [Marker] = []
@@ -44,14 +58,19 @@ final class EnhancedAudioViewModel: ObservableObject {
     @Published var pendingGroupAssignment: ClosedRange<Int>? = nil
     
     // Transient detection
-    @Published var transientThreshold: Double = 0.3
+    @Published var transientThreshold: Double = 1.5
     @Published var transientOffsetMs: Double = 0.0  // Milliseconds to pre-empt transients
     @Published var transientMarkers: Set<Int> = []
     @Published var hasDetectedTransients = false
+    @Published var showTransientMarkers = true
+    @Published var selectedDetectionAlgorithm: TransientDetectionAlgorithm = .multiscaleTimeDomain
     
     // Transient inspection mode
     @Published var isInspectingTransients = false
     @Published var currentTransientIndex = 0
+    @Published var autoAdvance = false
+    @Published var autoAudition = false
+    @Published var auditionLoopDuration: Double = 1.0 // Duration in seconds
     
     // Outlier detection
     @Published var showOutlierAlert = false
@@ -79,6 +98,7 @@ final class EnhancedAudioViewModel: ObservableObject {
         print("=== IMPORT WAV START ===")
         print("Attempting to import: \(url.absoluteString)")
         
+        
         do {
             print("Creating AVAudioFile...")
             let file = try AVAudioFile(forReading: url)
@@ -86,6 +106,7 @@ final class EnhancedAudioViewModel: ObservableObject {
             print("File length: \(file.length) samples")
             print("Sample rate: \(file.fileFormat.sampleRate)")
             print("Channel count: \(file.fileFormat.channelCount)")
+            self.sampleRate = file.fileFormat.sampleRate
             
             // Get float channel data using AudioKit's approach
             print("Getting float channel data...")
@@ -209,7 +230,7 @@ final class EnhancedAudioViewModel: ObservableObject {
         
         // Analyze the last 50ms of the region
         let analysisWindowMs = 50.0
-        let sampleRate = 44100.0 // Assuming 44.1kHz
+        let sampleRate = self.sampleRate
         let analysisWindowSamples = Int(analysisWindowMs * sampleRate / 1000.0)
         
         let analysisStart = max(startPosition, newEndPosition - analysisWindowSamples)
@@ -352,6 +373,8 @@ final class EnhancedAudioViewModel: ObservableObject {
     @Published var preInspectDragZoom: Double = 1.0
     @Published var preInspectDragOffset: Double = 0.0
     
+    private var auditionTimer: Timer?
+    
     func startTransientDragInInspectMode(marker: Marker) {
         guard isInspectingTransients else { return }
         print("=== START TRANSIENT DRAG IN INSPECT MODE ===")
@@ -362,7 +385,7 @@ final class EnhancedAudioViewModel: ObservableObject {
         preInspectDragOffset = scrollOffset
         
         // Zoom to show 100ms (50ms each side) around the marker
-        let sampleRate = 44100.0 // Assuming standard sample rate
+        let sampleRate = self.sampleRate
         let samplesFor50ms = Int(50.0 * sampleRate / 1000.0)
         let startSample = max(0, marker.samplePosition - samplesFor50ms)
         let endSample = min(totalSamples, marker.samplePosition + samplesFor50ms)
@@ -376,11 +399,88 @@ final class EnhancedAudioViewModel: ObservableObject {
         // Center on the marker
         let markerPosition = Double(marker.samplePosition) / Double(totalSamples)
         scrollOffset = max(0, min(1.0 - 1.0/zoomLevel, markerPosition - 0.5/zoomLevel))
+        
+        // Start audition if enabled
+        if autoAudition {
+            startAuditionLoop(marker: marker)
+        }
+    }
+    
+    @Published var currentDraggedMarkerIndex: Int? = nil
+    
+    private func startAuditionLoop(marker: Marker) {
+        guard let player = audioPlayer, let buffer = sampleBuffer else { return }
+        
+        // Stop any existing audition
+        stopAuditionLoop()
+        
+        // Store the marker index for real-time position updates
+        currentDraggedMarkerIndex = markers.firstIndex(where: { $0.id == marker.id })
+        
+        // Function to play the loop
+        func playLoop() {
+            // Get the current position of the marker being dragged
+            guard let markerIndex = currentDraggedMarkerIndex,
+                  markerIndex < markers.count else { return }
+            
+            let currentMarker = markers[markerIndex]
+            let sampleRate = player.format.sampleRate
+            let startTime = TimeInterval(currentMarker.samplePosition) / sampleRate
+            
+            // Calculate duration based on loop setting
+            let loopDurationSamples = Int(auditionLoopDuration * sampleRate)
+            
+            // Find end position (either custom, next marker, or loop duration later)
+            let endPosition: Int
+            
+            if let customEnd = currentMarker.customEndPosition {
+                endPosition = min(customEnd, currentMarker.samplePosition + loopDurationSamples)
+            } else {
+                let allMarkerPositions = markers.map { $0.samplePosition }.sorted()
+                if let nextIndex = allMarkerPositions.firstIndex(where: { $0 > currentMarker.samplePosition }) {
+                    endPosition = min(allMarkerPositions[nextIndex], currentMarker.samplePosition + loopDurationSamples)
+                } else {
+                    endPosition = min(buffer.samples.count, currentMarker.samplePosition + loopDurationSamples)
+                }
+            }
+            
+            let endTime = TimeInterval(endPosition) / sampleRate
+            let duration = endTime - startTime
+            
+            // Play from the current marker position
+            player.stop()
+            player.currentTime = startTime
+            player.play()
+            
+            // Schedule stop and restart
+            auditionTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { _ in
+                if self.isDraggingTransientInInspectMode && self.autoAudition {
+                    playLoop() // Restart the loop with updated position
+                }
+            }
+        }
+        
+        // Start the first loop
+        playLoop()
+    }
+    
+    private func stopAuditionLoop() {
+        auditionTimer?.invalidate()
+        auditionTimer = nil
+        currentDraggedMarkerIndex = nil
+        if audioPlayer?.isPlaying == true {
+            audioPlayer?.stop()
+        }
     }
     
     func endTransientDragInInspectMode() {
         guard isDraggingTransientInInspectMode else { return }
         print("=== END TRANSIENT DRAG IN INSPECT MODE ===")
+        
+        // Stop audition if it was playing
+        if autoAudition {
+            stopAuditionLoop()
+        }
         
         // Log marker positions before returning to normal view
         let sortedTransients = Array(transientMarkers).sorted()
@@ -393,8 +493,13 @@ final class EnhancedAudioViewModel: ObservableObject {
         
         isDraggingTransientInInspectMode = false
         
-        // Return to inspect mode zoom for the current region
-        focusOnTransient(at: currentTransientIndex)
+        // If Auto Advance is enabled, move to the next transient
+        if autoAdvance && currentTransientIndex < markers.count - 1 {
+            nextTransient()
+        } else {
+            // Return to inspect mode zoom for the current region
+            focusOnTransient(at: currentTransientIndex)
+        }
     }
     
     func updateTempSelection(startX: CGFloat, currentX: CGFloat, width: CGFloat) {
@@ -439,9 +544,10 @@ final class EnhancedAudioViewModel: ObservableObject {
             // Keep selection visible for playback
             // tempSelection = nil  // Don't clear selection
         } else {
-            // Store selection for manual assignment
+            // Store selection for manual assignment - the UI will show the controls
             pendingGroupAssignment = range
-            showGroupAssignmentMenu = true
+            // Don't show popover anymore
+            showGroupAssignmentMenu = false
         }
     }
     
@@ -674,6 +780,7 @@ final class EnhancedAudioViewModel: ObservableObject {
     // MARK: Transient Detection
     func detectTransients() {
         print("=== TRANSIENT DETECTION START ===")
+        print("Using algorithm: \(selectedDetectionAlgorithm.displayName)")
         guard let buffer = sampleBuffer else {
             print("No sample buffer available")
             return
@@ -707,6 +814,42 @@ final class EnhancedAudioViewModel: ObservableObject {
         print("Current threshold: \(transientThreshold)")
         print("Sample range to analyze: \(endSample - startSample) samples")
         
+        var detectedTransients: Set<Int> = []
+        
+        switch selectedDetectionAlgorithm {
+        case .energy:
+            detectedTransients = detectTransientsUsingEnergy(samples: samples,
+                                                            startSample: startSample,
+                                                            endSample: endSample)
+
+        case .superFlux:
+            detectedTransients = detectTransientsUsingSuperFlux(samples: samples,
+                                                                startSample: startSample,
+                                                                endSample: endSample)
+
+        case .IRCAM:
+            detectedTransients = detectTransientsUsingIRCAMStyle(samples: samples,
+                                                                 startSample: startSample,
+                                                                 endSample: endSample)
+
+        case .multiscaleTimeDomain:
+            detectedTransients = detectTransientsUsingMultiscaleTimeDomain(samples: samples,
+                                                                           startSample: startSample,
+                                                                           endSample: endSample)
+        }
+        
+        transientMarkers = detectedTransients
+        hasDetectedTransients = true
+        
+        print("Detected \(detectedTransients.count) transients with threshold \(transientThreshold)")
+        print("=== TRANSIENT DETECTION END ===")
+        
+        // Update markers to include transients
+        updateMarkersWithTransients()
+    }
+    
+    // MARK: Energy-based transient detection (original algorithm)
+    private func detectTransientsUsingEnergy(samples: [Float], startSample: Int, endSample: Int) -> Set<Int> {
         // Use larger window for better transient detection
         let windowSize = 2048
         let hopSize = windowSize / 2
@@ -753,35 +896,631 @@ final class EnhancedAudioViewModel: ObservableObject {
                 
                 // Check if this is a local peak above threshold
                 if curr > prev && curr > next && curr > detectionThreshold {
-                    let samplePosition = startSample + i * hopSize  // Add region offset
-                    
-                    // Check minimum spacing
-                    if samplePosition - lastTransientSample >= minSpacing {
-                        // Apply offset (convert ms to samples)
-                        let sampleRate = 44100.0  // Assuming standard sample rate
-                        let offsetSamples = Int(transientOffsetMs * sampleRate / 1000.0)
-                        let adjustedPosition = max(0, samplePosition + offsetSamples)  // Add offset instead of subtract
-                        
-                        detectedTransients.insert(adjustedPosition)
+                    let samplePosition = startSample + i * hopSize  // region offset
+                    let sr = sampleRate                              // ← use the model’s real sample rate
+                    let minSpacingSamples = Int(0.25 * sr)           // keep your 0.25s policy; feel free to tune
+
+                    if samplePosition - lastTransientSample >= minSpacingSamples {
+                        // 2nd-stage micro-alignment (exact attack + zero-cross)
+                        let refined = refineOnset(
+                            samples: samples,
+                            roughIndex: samplePosition,
+                            sampleRate: sr,
+                            searchBackMs: 25,      // widen if you tend to land late
+                            searchForwardMs: 10,   // widen if you tend to land early
+                            energyWinMs: 1.5,
+                            holdMs: 1.0,
+                            kSigma: Float(max(1.5, min(4.0, transientThreshold * 3.0))),
+                            zcSearchMs: 4.0
+                        )
+
+                        let offsetSamples = Int(transientOffsetMs * sr / 1000.0)
+                        let finalPos = max(0, refined + offsetSamples)
+
+                        detectedTransients.insert(finalPos)
                         lastTransientSample = samplePosition
-                        
-                        if detectedTransients.count <= 10 {
-                            print("Transient at window \(i) -> sample \(samplePosition) (adjusted to \(adjustedPosition) with \(transientOffsetMs)ms offset, energy: \(curr))")
-                        }
                     }
                 }
             }
         }
         
-        transientMarkers = detectedTransients
-        hasDetectedTransients = true
-        
-        print("Detected \(detectedTransients.count) transients with threshold \(transientThreshold)")
-        print("=== TRANSIENT DETECTION END ===")
-        
-        // Update markers to include transients
-        updateMarkersWithTransients()
+        return detectedTransients
     }
+    
+    // MARK: SuperFlux++ (log-magnitude spectral flux with time max-filter, zero-phase smoothing)
+    private func detectTransientsUsingSuperFlux(samples: [Float],
+                                                startSample: Int,
+                                                endSample: Int) -> Set<Int> {
+        // ---- Parameters (tweak if needed) ----
+        let sampleRate: Double = 44100.0
+        let winSize = 2048                 // ~46 ms at 44.1k
+        let hopSize = 256                  // ~5.8 ms hop
+        let maxFilterLookback = 3          // frames for vibrato suppression
+        let smoothRadius = 3               // frames (zero-phase)
+        let minSpacingMs = 30.0            // minimum distance between onsets
+        let kStd = Float(max(0.1, min(3.0, transientThreshold * 3.0))) // adaptive scale from UI slider
+        
+        // ---- 1) STFT magnitude spectrogram (log1p compression) ----
+        let region = Array(samples[startSample..<endSample])
+        let frames = max(0, (region.count - winSize) / hopSize + 1)
+        if frames < 3 { return [] }
+
+        let hann = vDSP.window(ofType: Float.self, usingSequence: .hanningDenormalized,
+                               count: winSize, isHalfWindow: false)
+
+        // FFT setup
+        let log2n = vDSP_Length(round(log2(Float(winSize))))
+        guard let fft = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else { return [] }
+        defer { vDSP_destroy_fftsetup(fft) }
+
+        var mags: [[Float]] = Array(repeating: Array(repeating: 0, count: winSize/2), count: frames)
+
+        // Reusable buffers
+        var real = [Float](repeating: 0, count: winSize/2)
+        var imag = [Float](repeating: 0, count: winSize/2)
+        var frameBuf = [Float](repeating: 0, count: winSize)
+
+        for t in 0..<frames {
+            let s = t * hopSize
+            // windowed frame
+            vDSP.multiply(region[s..<(s+winSize)], hann, result: &frameBuf)
+
+            // Pack real input into split-complex
+            var split = DSPSplitComplex(realp: &real, imagp: &imag)
+            frameBuf.withUnsafeBytes { raw in
+                let ptr = raw.bindMemory(to: DSPComplex.self)
+                vDSP_ctoz(ptr.baseAddress!, 2, &split, 1, vDSP_Length(winSize/2))
+            }
+
+            // FFT
+            vDSP_fft_zrip(fft, &split, 1, log2n, FFTDirection(FFT_FORWARD))
+
+            // Convert to magnitudes
+            var mag2 = [Float](repeating: 0, count: winSize/2)
+            vDSP_zvmags(&split, 1, &mag2, 1, vDSP_Length(winSize/2))
+
+            // sqrt for magnitude (vForce)
+            var mag = [Float](repeating: 0, count: winSize/2)
+            var n = Int32(mag.count)
+            vvsqrtf(&mag, mag2, &n)
+
+            // log compression
+            var one: Float = 1.0
+            vDSP_vsadd(mag, 1, &one, &mag, 1, vDSP_Length(mag.count)) // mag = mag + 1
+            var nLog = Int32(mag.count)
+            vvlogf(&mag, mag, &nLog)                                   // mag = log(mag)
+
+            mags[t] = mag
+        }
+
+        // ---- 2) SuperFlux novelty: time max-filter + half-wave rectified first difference ----
+        var novelty = [Float](repeating: 0, count: frames)
+        if frames >= 2 {
+            for t in 1..<frames {
+                var sumPos: Float = 0
+                // For each bin, compare to maximum over the past few frames
+                let t0 = max(0, t - maxFilterLookback)
+                for k in 0..<winSize/2 {
+                    var prevMax: Float = mags[t0][k]
+                    if t0 < t {
+                        for u in (t0..<t) {
+                            if mags[u][k] > prevMax { prevMax = mags[u][k] }
+                        }
+                    }
+                    let d = mags[t][k] - prevMax
+                    if d > 0 { sumPos += d }
+                }
+                novelty[t] = sumPos
+            }
+        }
+
+        // ---- 3) Zero-phase smoothing & local baseline subtraction ----
+        novelty = zeroPhaseSmooth(novelty, radius: smoothRadius)
+        let baseline = movingAverage(novelty, radius: 10) // ~10 * 5.8ms ≈ 58ms
+        var nf = [Float](repeating: 0, count: frames)
+        vDSP_vsub(baseline, 1, novelty, 1, &nf, 1, vDSP_Length(frames)) // nf = novelty - baseline
+        // rectify
+        for i in 0..<nf.count { if nf[i] < 0 { nf[i] = 0 } }
+
+        // ---- 4) Global threshold + peak picking ----
+        let (mu, sigma) = meanStd(nf)
+        let thr = mu + kStd * sigma
+        let minSpacingSamples = Int((minSpacingMs / 1000.0) * sampleRate)
+        let onsetFrames = peakPick(nf, threshold: thr, minSeparation: 2) // ≥ ~12 ms
+
+        let sr = sampleRate
+        let offsetSamples = Int(transientOffsetMs * sr / 1000.0)
+        var lastPlaced = -minSpacingSamples
+        var out: Set<Int> = []
+
+        for f in onsetFrames {
+            let rough = startSample + f * hopSize
+
+            let refined = refineOnset(
+                samples: samples,
+                roughIndex: rough,
+                sampleRate: sr,
+                searchBackMs: 25,
+                searchForwardMs: 10,
+                energyWinMs: 1.5,
+                holdMs: 1.0,
+                kSigma: Float(max(1.5, min(4.0, transientThreshold * 3.0))),
+                zcSearchMs: 4.0
+            )
+
+            let finalPos = max(0, refined + offsetSamples)
+            if finalPos - lastPlaced >= minSpacingSamples {
+                out.insert(finalPos)
+                lastPlaced = finalPos
+            }
+        }
+        return out
+    }
+
+    // MARK: IRCAM-style (centroid + peak-count + HF ratio with bidirectional smoothing)
+    private func detectTransientsUsingIRCAMStyle(samples: [Float],
+                                                 startSample: Int,
+                                                 endSample: Int) -> Set<Int> {
+        // ---- Parameters ----
+        let sampleRate: Double = 44100.0
+        let winSize = 2048
+        let hopSize = 256
+        let smoothRadius = 3
+        let minSpacingMs = 30.0
+        let kStd = Float(max(0.1, min(3.0, transientThreshold * 3.0)))
+
+        // STFT magnitudes (shared helper)
+        let spect = stftMagnitudes(samples: samples, start: startSample, end: endSample,
+                                   winSize: winSize, hopSize: hopSize)
+        let frames = spect.count
+        if frames < 3 { return [] }
+        let bins = winSize / 2
+        let nyquist: Float = Float(sampleRate / 2)
+
+        // ---- 1) Frame-wise features ----
+        var centroid = [Float](repeating: 0, count: frames)
+        var peakCount = [Float](repeating: 0, count: frames)
+        var hfRatio = [Float](repeating: 0, count: frames)
+
+        // Bin frequencies
+        var freqs = [Float](repeating: 0, count: bins)
+        for k in 0..<bins { freqs[k] = Float(k) * nyquist / Float(bins) }
+
+        for t in 0..<frames {
+            let mag = spect[t]
+            var sumMag: Float = 0
+            var sumFMag: Float = 0
+
+            // centroid + HF ratio
+            var hfSum: Float = 0
+            let hfCut: Float = 2000 // 2 kHz
+            for k in 0..<bins {
+                let m = mag[k]
+                sumMag += m
+                sumFMag += freqs[k] * m
+                if freqs[k] >= hfCut { hfSum += m }
+            }
+            centroid[t] = sumMag > 0 ? (sumFMag / sumMag) / nyquist : 0 // normalised 0..1
+            hfRatio[t] = sumMag > 0 ? (hfSum / sumMag) : 0
+
+            // local-peak count (simple)
+            var pc: Int = 0
+            if bins > 2 {
+                for k in 1..<(bins - 1) {
+                    let m = mag[k]
+                    if m > mag[k-1] && m > mag[k+1] {
+                        // rough magnitude threshold: > median of frame
+                        // compute once lazily
+                        pc += 1
+                    }
+                }
+            }
+            peakCount[t] = Float(pc)
+        }
+
+        // ---- 2) Bidirectional smoothing ----
+        centroid = zeroPhaseSmooth(centroid, radius: smoothRadius)
+        peakCount = zeroPhaseSmooth(peakCount, radius: smoothRadius)
+        hfRatio = zeroPhaseSmooth(hfRatio, radius: smoothRadius)
+
+        // ---- 3) Build novelty from positive deltas ----
+        var novelty = [Float](repeating: 0, count: frames)
+        let wC: Float = 0.5, wP: Float = 0.3, wH: Float = 0.2
+        for t in 1..<frames {
+            let dC = max(0, centroid[t] - centroid[t-1])
+            let dP = max(0, peakCount[t] - peakCount[t-1])
+            let dH = max(0, hfRatio[t] - hfRatio[t-1])
+            novelty[t] = wC * dC + wP * dP + wH * dH
+        }
+
+        // Local baseline removal
+        let baseline = movingAverage(novelty, radius: 10)
+        var nf = [Float](repeating: 0, count: frames)
+        vDSP_vsub(baseline, 1, novelty, 1, &nf, 1, vDSP_Length(frames))
+        for i in 0..<nf.count { if nf[i] < 0 { nf[i] = 0 } }
+
+        // ---- 4) Threshold + peak picking ----
+        let (mu, sigma) = meanStd(nf)
+        let thr = mu + kStd * sigma
+        let minSpacingSamples = Int((minSpacingMs / 1000.0) * sampleRate)
+        let onsetFrames = peakPick(nf, threshold: thr, minSeparation: 2)
+
+        let sr = sampleRate
+        let offsetSamples = Int(transientOffsetMs * sr / 1000.0)
+        var lastPlaced = -minSpacingSamples
+        var out: Set<Int> = []
+
+        for f in onsetFrames {
+            let rough = startSample + f * hopSize
+
+            let refined = refineOnset(
+                samples: samples,
+                roughIndex: rough,
+                sampleRate: sr,
+                searchBackMs: 25,
+                searchForwardMs: 10,
+                energyWinMs: 1.5,
+                holdMs: 1.0,
+                kSigma: Float(max(1.5, min(4.0, transientThreshold * 3.0))),
+                zcSearchMs: 4.0
+            )
+
+            let finalPos = max(0, refined + offsetSamples)
+            if finalPos - lastPlaced >= minSpacingSamples {
+                out.insert(finalPos)
+                lastPlaced = finalPos
+            }
+        }
+        return out
+    }
+
+    // MARK: Multiscale time-domain (dual-envelope via multi-scale differences)
+    private func detectTransientsUsingMultiscaleTimeDomain(samples: [Float],
+                                                           startSample: Int,
+                                                           endSample: Int) -> Set<Int> {
+        // ---- Parameters ----
+        let sampleRate: Double = 44100.0
+        let region = Array(samples[startSample..<endSample])
+        let N = region.count
+        if N < 2000 { return [] }
+
+        // Scales in milliseconds (converted to samples)
+        let scalesMs: [Double] = [1.0, 2.0, 4.0, 8.0]   // 1–8 ms
+        let ds = scalesMs.map { max(1, Int(($0 / 1000.0) * sampleRate)) }
+
+        // Novelty (per sample), then we’ll peak-pick with a refractory in samples
+        var novelty = [Float](repeating: 0, count: N)
+
+        for d in ds {
+            if d >= N { continue }
+
+            // 1) Multi-scale absolute difference: |x[n] - x[n-d]|
+            var adiff = [Float](repeating: 0, count: N)
+            for n in d..<N {
+                adiff[n] = abs(region[n] - region[n - d])
+            }
+
+            // 2) Dual envelopes: fast vs slow moving averages
+            let fastRadius = max(1, d / 2)
+            let slowRadius = max(fastRadius + 1, d * 4)
+
+            let fast = movingAverage(adiff, radius: fastRadius)
+            let slow = movingAverage(adiff, radius: slowRadius)
+
+            // 3) Band novelty = max(0, fast - slow)
+            for n in 0..<N {
+                let v = fast[n] - slow[n]
+                if v > 0 { novelty[n] += v }
+            }
+        }
+
+        // Zero-phase smoothing
+        novelty = zeroPhaseSmooth(novelty, radius: 16) // ~16 samples ≈ 0.36 ms
+
+        // Threshold from stats
+        let (mu, sigma) = meanStd(novelty)
+        let kStd = Float(max(0.1, min(5.0, transientThreshold * 5.0)))
+        let thr = mu + kStd * sigma
+
+        // Peak pick directly in sample domain
+        let minSpacingSamples = Int((25.0 / 1000.0) * sampleRate)
+        var peaks: [Int] = []
+        var last = -minSpacingSamples
+        for n in 1..<(N-1) {
+            let y0 = novelty[n - 1], y1 = novelty[n], y2 = novelty[n + 1]
+            if y1 > thr && y1 > y0 && y1 > y2 {
+                if (n - last) >= minSpacingSamples {
+                    peaks.append(n)
+                    last = n
+                }
+            }
+        }
+
+        let sr = sampleRate
+        let offsetSamples = Int(transientOffsetMs * sr / 1000.0)
+        var out: Set<Int> = []
+        var lastPlaced = -minSpacingSamples
+
+        for p in peaks {
+            let rough = startSample + p
+
+            let refined = refineOnset(
+                samples: samples,
+                roughIndex: rough,
+                sampleRate: sr,
+                searchBackMs: 25,
+                searchForwardMs: 10,
+                energyWinMs: 1.5,
+                holdMs: 1.0,
+                kSigma: Float(max(1.5, min(4.0, transientThreshold * 3.0))),
+                zcSearchMs: 4.0
+            )
+
+            let finalPos = max(0, refined + offsetSamples)
+            if finalPos - lastPlaced >= minSpacingSamples {
+                out.insert(finalPos)
+                lastPlaced = finalPos
+            }
+        }
+        return out
+    }
+    
+    // MARK: - Micro-aligner: refine rough onsets to exact start + zero-crossing
+    // 1) Look ±window around rough index
+    // 2) Build short-time energy (STE) envelope
+    // 3) Find earliest time STE rises above (baseline + k·sigma) and holds for a few samples
+    // 4) Snap to a nearby rising zero-crossing so the cut is click-free
+    private func refineOnset(samples: [Float],
+                             roughIndex: Int,
+                             sampleRate: Double = 44100.0,
+                             searchBackMs: Double = 25.0,
+                             searchForwardMs: Double = 10.0,
+                             energyWinMs: Double = 1.5,     // STE window ~1.5 ms
+                             holdMs: Double = 1.0,          // must stay above thr for this long
+                             kSigma: Float = 3.0,           // threshold = baseline + k*std
+                             zcSearchMs: Double = 4.0       // search radius for zero-crossing
+    ) -> Int {
+        if samples.isEmpty { return max(0, roughIndex) }
+
+        let back = max(1, Int((searchBackMs / 1000.0) * sampleRate))
+        let fwd  = max(1, Int((searchForwardMs / 1000.0) * sampleRate))
+        let a = max(0, roughIndex - back)
+        let b = min(samples.count, roughIndex + fwd)
+        if b - a < 16 { return max(0, roughIndex) }
+
+        // Work on a local slice for robustness & speed
+        let x = Array(samples[a..<b])
+
+        // --- Short-time energy envelope (squared -> centered moving average) ---
+        let energyWin = max(4, Int((energyWinMs / 1000.0) * sampleRate)) // e.g. ~66 samples @44.1k
+        let ste = shortTimeEnergy(x, win: energyWin)                      // same length as x
+
+        // --- Local noise baseline from earliest part of the slice (first 8–12 ms or up to 30% of slice) ---
+        let baselineSpan = min( max(energyWin * 4, Int(0.12 * Double(x.count))), max(energyWin * 2, x.count / 3) )
+        let (mu0, sd0) = meanStd(Array(ste.prefix(baselineSpan)))
+        let thr = mu0 + kSigma * sd0
+
+        // --- Earliest sustained exceedance over threshold (with hold) ---
+        let hold = max(2, Int((holdMs / 1000.0) * sampleRate))
+        var idxInSlice: Int? = nil
+        var run = 0
+        for i in 1..<ste.count {
+            if ste[i] > thr && ste[i] >= ste[i-1] {
+                run += 1
+                if run >= hold { idxInSlice = i - run + 1; break }
+            } else {
+                run = 0
+            }
+        }
+        // Fallback: if nothing crosses, keep rough index
+        let candidate = a + (idxInSlice ?? (roughIndex - a))
+
+        // --- Snap to a nearby rising zero-crossing (prefer the last rising ZC before candidate) ---
+        let zcRadius = max(4, Int((zcSearchMs / 1000.0) * sampleRate))
+        let snapped = nearestRisingZeroCrossing(samples: samples,
+                                                target: candidate,
+                                                searchRadius: zcRadius,
+                                                ste: ste,
+                                                steOffset: a,
+                                                thr: thr)
+
+        return snapped
+    }
+
+    // Centered moving-average short-time energy (STE) with edge handling
+    private func shortTimeEnergy(_ x: [Float], win: Int) -> [Float] {
+        let n = x.count
+        if n == 0 { return [] }
+        if win <= 1 { return x.map { $0 * $0 } }
+
+        // squared signal
+        var sq = [Float](repeating: 0, count: n)
+        vDSP_vsq(x, 1, &sq, 1, vDSP_Length(n)) // sq[i] = x[i]^2
+
+        // prefix sums for fast windowed sum
+        var prefix = [Float](repeating: 0, count: n + 1)
+        for i in 0..<n { prefix[i + 1] = prefix[i] + sq[i] }
+
+        let r = win / 2
+        var out = [Float](repeating: 0, count: n)
+        for i in 0..<n {
+            let a = max(0, i - r)
+            let b = min(n - 1, i + r)
+            let sum = prefix[b + 1] - prefix[a]
+            out[i] = sum / Float(b - a + 1)
+        }
+        return out
+    }
+
+    // Find nearest *rising* zero-crossing near 'target'.
+    // Preference order: last rising ZC at/behind target; otherwise nearest rising ZC ahead;
+    // if none, return target unchanged.
+    private func nearestRisingZeroCrossing(samples: [Float],
+                                           target: Int,
+                                           searchRadius: Int,
+                                           ste: [Float],
+                                           steOffset: Int,
+                                           thr: Float) -> Int {
+        let n = samples.count
+        if n < 2 { return max(0, min(n - 1, target)) }
+
+        let L = max(1, target - searchRadius)
+        let R = min(n - 2, target + searchRadius)
+
+        // Helper to test "rising" ZC and ensure energy ramps after it
+        func isGoodRisingZC(at i: Int) -> Bool {
+            // rising: x[i] <= 0 and x[i+1] > 0
+            if !(samples[i] <= 0 && samples[i + 1] > 0) { return false }
+            // Require the STE to exceed threshold within a short lookahead (to avoid pre-noise)
+            let steIdx = max(0, min(ste.count - 1, i - steOffset))
+            let look = min(ste.count - 1, steIdx + 200) // ~ up to ~4.5 ms @44.1k (tune if needed)
+            if steIdx >= look { return false }
+            var exceeds = false
+            for k in steIdx...look where ste[k] > thr {
+                exceeds = true; break
+            }
+            return exceeds
+        }
+
+        // 1) Search backwards for last good rising ZC at/behind target
+        var bestBack: Int? = nil
+        if target >= L {
+            var i = min(target, R)
+            while i > L {
+                if isGoodRisingZC(at: i - 1) { bestBack = i - 1; break }
+                i -= 1
+            }
+        }
+        if let b = bestBack { return b }
+
+        // 2) Otherwise search forward for the first good rising ZC ahead
+        var i = max(target, L)
+        while i < R {
+            if isGoodRisingZC(at: i) { return i }
+            i += 1
+        }
+
+        // 3) Fallback: return the target
+        return max(0, min(n - 1, target))
+    }
+
+ 
+
+    // ============================
+    // MARK: - Small DSP helpers
+    // ============================
+
+    // Simple mean/std (population)
+    // Mean/std for Float arrays (population std)
+    private func meanStd(_ x: [Float]) -> (Float, Float) {
+        if x.isEmpty { return (0, 0) }
+        var mean: Float = 0
+        vDSP_meanv(x, 1, &mean, vDSP_Length(x.count))
+        var m2: Float = 0
+        vDSP_measqv(x, 1, &m2, vDSP_Length(x.count)) // mean of squares
+        let varPop = max(0, m2 - mean * mean)
+        return (mean, sqrtf(varPop))
+    }
+
+
+    // Zero-phase (forward+reverse) moving average
+    private func zeroPhaseSmooth(_ x: [Float], radius: Int) -> [Float] {
+        if radius <= 0 { return x }
+        let y = movingAverage(x, radius: radius)
+        let yr = Array(y.reversed())
+        let zr = movingAverage(yr, radius: radius)
+        return Array(zr.reversed())
+    }
+
+    // Centered moving average (radius r -> window = 2r+1), edges replicated
+    private func movingAverage(_ x: [Float], radius: Int) -> [Float] {
+        if radius <= 0 || x.isEmpty { return x }
+        let n = x.count
+        let w = 2 * radius + 1
+        var y = [Float](repeating: 0, count: n)
+        var acc: Float = 0
+
+        // Prefix sum for efficiency
+        var prefix = [Float](repeating: 0, count: n + 1)
+        for i in 0..<n { prefix[i+1] = prefix[i] + x[i] }
+
+        for i in 0..<n {
+            let a = max(0, i - radius)
+            let b = min(n - 1, i + radius)
+            let sum = prefix[b+1] - prefix[a]
+            y[i] = sum / Float(b - a + 1)
+        }
+        return y
+    }
+
+    // Simple peak picker on frame-domain novelty
+    private func peakPick(_ novelty: [Float], threshold: Float, minSeparation: Int) -> [Int] {
+        var peaks: [Int] = []
+        var last = -minSeparation
+        for i in 1..<(novelty.count - 1) {
+            if novelty[i] > threshold && novelty[i] > novelty[i-1] && novelty[i] > novelty[i+1] {
+                if (i - last) >= minSeparation {
+                    peaks.append(i)
+                    last = i
+                }
+            }
+        }
+        return peaks
+    }
+
+    // Small STFT helper returning log-magnitudes (frames x bins)
+    private func stftMagnitudes(samples: [Float],
+                                start: Int,
+                                end: Int,
+                                winSize: Int,
+                                hopSize: Int) -> [[Float]] {
+        let region = Array(samples[start..<end])
+        let frames = max(0, (region.count - winSize) / hopSize + 1)
+        if frames == 0 { return [] }
+
+        let hann = vDSP.window(ofType: Float.self, usingSequence: .hanningDenormalized,
+                               count: winSize, isHalfWindow: false)
+
+        let log2n = vDSP_Length(round(log2(Float(winSize))))
+        guard let fft = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else { return [] }
+        defer { vDSP_destroy_fftsetup(fft) }
+
+        var out = Array(repeating: Array(repeating: 0 as Float, count: winSize/2), count: frames)
+        var real = [Float](repeating: 0, count: winSize/2)
+        var imag = [Float](repeating: 0, count: winSize/2)
+        var frameBuf = [Float](repeating: 0, count: winSize)
+
+        for t in 0..<frames {
+            let s = t * hopSize
+            vDSP.multiply(region[s..<(s+winSize)], hann, result: &frameBuf)
+
+            var split = DSPSplitComplex(realp: &real, imagp: &imag)
+            frameBuf.withUnsafeBytes { raw in
+                let ptr = raw.bindMemory(to: DSPComplex.self)
+                vDSP_ctoz(ptr.baseAddress!, 2, &split, 1, vDSP_Length(winSize/2))
+            }
+            vDSP_fft_zrip(fft, &split, 1, log2n, FFTDirection(FFT_FORWARD))
+
+            // Convert to magnitudes (squared magnitude)
+            var mag2 = [Float](repeating: 0, count: winSize/2)
+            vDSP_zvmags(&split, 1, &mag2, 1, vDSP_Length(winSize/2))
+
+            // sqrt for magnitude (vForce)
+            var mag = [Float](repeating: 0, count: winSize/2)
+            var n = Int32(mag.count)
+            vvsqrtf(&mag, mag2, &n)
+
+            // log compression: log(mag + 1)
+            var one: Float = 1.0
+            vDSP_vsadd(mag, 1, &one, &mag, 1, vDSP_Length(mag.count))
+            var nLog = n
+            vvlogf(&mag, mag, &nLog)
+
+            out[t] = mag
+        }
+        return out
+    }
+
     
     
     func updateMarkersWithTransients() {
@@ -816,6 +1555,25 @@ final class EnhancedAudioViewModel: ObservableObject {
         }
         transientMarkers.removeAll()
         hasDetectedTransients = false
+    }
+    
+    func deleteTransientsInRange(_ range: ClosedRange<Int>) {
+        // Find all transient markers in the range
+        let markersToDelete = markers.filter { marker in
+            marker.group == nil && range.contains(marker.samplePosition)
+        }
+        
+        // Remove from transientMarkers set
+        for marker in markersToDelete {
+            transientMarkers.remove(marker.samplePosition)
+        }
+        
+        // Remove from markers array
+        markers.removeAll { marker in
+            markersToDelete.contains { $0.id == marker.id }
+        }
+        
+        print("Deleted \(markersToDelete.count) transient markers in selected range")
     }
     
     func startTransientInspection() {
@@ -890,6 +1648,45 @@ final class EnhancedAudioViewModel: ObservableObject {
         }
     }
     
+    func mergeWithPreviousRegion() {
+        guard isInspectingTransients else { return }
+        let sortedTransients = Array(transientMarkers).sorted()
+        guard currentTransientIndex > 0 else { return }
+        
+        // Get current and previous transient positions
+        let currentTransientPosition = sortedTransients[currentTransientIndex]
+        let previousTransientPosition = sortedTransients[currentTransientIndex - 1]
+        
+        // Find the previous marker
+        if let previousMarkerIndex = markers.firstIndex(where: { $0.samplePosition == previousTransientPosition }) {
+            // Check if the current marker has a custom end position
+            if let currentMarkerIndex = markers.firstIndex(where: { $0.samplePosition == currentTransientPosition }),
+               let customEnd = markers[currentMarkerIndex].customEndPosition {
+                // Adopt the custom end position from the current marker
+                markers[previousMarkerIndex].customEndPosition = customEnd
+            } else {
+                // Calculate the end position
+                let currentRegionEnd: Int
+                if currentTransientIndex < sortedTransients.count - 1 {
+                    // There's another transient after the current one
+                    currentRegionEnd = sortedTransients[currentTransientIndex + 1]
+                } else {
+                    // The current region extends to the end of the file
+                    currentRegionEnd = totalSamples
+                }
+                markers[previousMarkerIndex].customEndPosition = currentRegionEnd
+            }
+        }
+        
+        // Find and remove the current marker
+        if let currentMarkerIndex = markers.firstIndex(where: { $0.samplePosition == currentTransientPosition }) {
+            deleteMarker(at: currentMarkerIndex)
+        }
+        
+        // Move to the previous region
+        previousTransient()
+    }
+    
     func nextTransient() {
         guard !markers.isEmpty else { return }
         currentTransientIndex = (currentTransientIndex + 1) % markers.count
@@ -941,9 +1738,10 @@ final class EnhancedAudioViewModel: ObservableObject {
         guard hasDetectedTransients else { return }
         
         // Calculate the sample rate and offset difference
-        let sampleRate = 44100.0
-        let oldOffsetSamples = Int(oldOffset * sampleRate / 1000.0)
-        let newOffsetSamples = Int(newOffset * sampleRate / 1000.0)
+        let sampleRate = self.sampleRate
+        let sr = self.sampleRate          // ← add this line
+        let oldOffsetSamples = Int(oldOffset * sr / 1000.0)
+        let newOffsetSamples = Int(newOffset * sr / 1000.0)
         let offsetDifference = newOffsetSamples - oldOffsetSamples
         
         // Update transient markers set
@@ -973,8 +1771,11 @@ final class EnhancedAudioViewModel: ObservableObject {
     func updateTransientThreshold(_ newThreshold: Double) {
         print("Threshold slider changed to: \(newThreshold)")
         transientThreshold = newThreshold
-        if hasDetectedTransients {
+        if hasDetectedTransients || !transientMarkers.isEmpty {
             print("Re-detecting transients with new threshold")
+            // Clear existing transient markers before re-detecting
+            clearDetectedTransients()
+            hasDetectedTransients = true
             detectTransients()
         } else {
             print("First threshold change - triggering initial detection")
@@ -1233,30 +2034,32 @@ struct EnhancedWaveformView: View {
                                     }
                                     
                                 } else {
-                                    // Normal mode - show all markers
-                                    for marker in viewModel.markers {
-                                        let x = viewModel.xPosition(for: marker.samplePosition, in: size.width)
-                                        
-                                        // Only draw if marker is visible
-                                        if x >= 0 && x <= size.width {
-                                            var markerLine = Path()
-                                            markerLine.move(to: CGPoint(x: x, y: 0))
-                                            markerLine.addLine(to: CGPoint(x: x, y: size.height))
+                                    // Normal mode - show all markers if enabled or in inspection mode
+                                    if viewModel.showTransientMarkers || viewModel.isInspectingTransients {
+                                        for marker in viewModel.markers {
+                                            let x = viewModel.xPosition(for: marker.samplePosition, in: size.width)
                                             
-                                            let color: Color = marker.group == nil ? .red : .green
-                                            context.stroke(markerLine, with: .color(color), lineWidth: 2)
-                                            
-                                            // Group label
-                                            if let group = marker.group {
-                                                let text = Text("\(group)")
-                                                    .font(.caption)
-                                                    .foregroundColor(.white)
+                                            // Only draw if marker is visible
+                                            if x >= 0 && x <= size.width {
+                                                var markerLine = Path()
+                                                markerLine.move(to: CGPoint(x: x, y: 0))
+                                                markerLine.addLine(to: CGPoint(x: x, y: size.height))
                                                 
-                                                // Draw background for label
-                                                let textSize = CGSize(width: 20, height: 16)
-                                                let labelRect = CGRect(x: x + 4, y: 12, width: textSize.width, height: textSize.height)
-                                                context.fill(Path(roundedRect: labelRect, cornerRadius: 4), with: .color(color))
-                                                context.draw(text, at: CGPoint(x: x + 14, y: 20))
+                                                let color: Color = marker.group == nil ? .red : .green
+                                                context.stroke(markerLine, with: .color(color), lineWidth: 2)
+                                                
+                                                // Group label
+                                                if let group = marker.group {
+                                                    let text = Text("\(group)")
+                                                        .font(.caption)
+                                                        .foregroundColor(.white)
+                                                    
+                                                    // Draw background for label
+                                                    let textSize = CGSize(width: 20, height: 16)
+                                                    let labelRect = CGRect(x: x + 4, y: 12, width: textSize.width, height: textSize.height)
+                                                    context.fill(Path(roundedRect: labelRect, cornerRadius: 4), with: .color(color))
+                                                    context.draw(text, at: CGPoint(x: x + 14, y: 20))
+                                                }
                                             }
                                         }
                                     }
@@ -1295,19 +2098,22 @@ struct EnhancedWaveformView: View {
                                                 // This is a cmd+click/drag - handle it as marker operation
                                                 if abs(value.translation.width) < 5 && abs(value.translation.height) < 5 {
                                                     print("Cmd+click @ \(value.location.x)")
-                                                    // Check if we're near an existing marker
-                                                    if let markerIndex = viewModel.findMarkerNearPosition(x: value.location.x, width: geometry.size.width) {
-                                                        // Remove the marker
-                                                        let marker = viewModel.markers[markerIndex]
-                                                        if marker.group == nil {
-                                                            viewModel.transientMarkers.remove(marker.samplePosition)
+                                                    // In inspection mode, don't handle marker deletion here - let the handles do it
+                                                    if !viewModel.isInspectingTransients {
+                                                        // Check if we're near an existing marker
+                                                        if let markerIndex = viewModel.findMarkerNearPosition(x: value.location.x, width: geometry.size.width) {
+                                                            // Remove the marker
+                                                            let marker = viewModel.markers[markerIndex]
+                                                            if marker.group == nil {
+                                                                viewModel.transientMarkers.remove(marker.samplePosition)
+                                                            }
+                                                            viewModel.markers.remove(at: markerIndex)
+                                                        } else {
+                                                            // Add a new marker
+                                                            viewModel.addMarker(atX: value.location.x, inWidth: geometry.size.width)
                                                         }
-                                                        viewModel.markers.remove(at: markerIndex)
-                                                    } else {
-                                                        // Add a new marker
-                                                        viewModel.addMarker(atX: value.location.x, inWidth: geometry.size.width)
+                                                        viewModel.draggingMarkerIndex = -1 // Signal that we handled cmd+click
                                                     }
-                                                    viewModel.draggingMarkerIndex = -1 // Signal that we handled cmd+click
                                                 }
                                                 return
                                             }
@@ -1347,7 +2153,8 @@ struct EnhancedWaveformView: View {
                                                 viewModel.draggingMarkerIndex = nil
                                             } else if abs(value.translation.width) < 5 && abs(value.translation.height) < 5 {
                                                 // This was effectively a tap, not a drag
-                                                // Don't commit selection for taps
+                                                // Clear any existing selection
+                                                viewModel.clearSelection()
                                             } else {
                                                 viewModel.commitSelection()
                                             }
@@ -1907,24 +2714,6 @@ struct EnhancedContentView: View {
                     defer { url.stopAccessingSecurityScopedResource() }
                     viewModel.importWAV(from: url)
                 }
-            }
-        }
-        .onKeyPress { key in
-            switch key.key {
-            case .leftArrow:
-                viewModel.scroll(by: -0.05)
-                return .handled
-            case .rightArrow:
-                viewModel.scroll(by: 0.05)
-                return .handled
-            case .upArrow:
-                viewModel.zoom(by: 1.2, at: 0.5, in: 1.0)
-                return .handled
-            case .downArrow:
-                viewModel.zoom(by: 0.8, at: 0.5, in: 1.0)
-                return .handled
-            default:
-                return .ignored
             }
         }
     }
