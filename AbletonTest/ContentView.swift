@@ -18,12 +18,20 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Tab selection
-            Picker("View", selection: $selectedTab) {
-                Text("Transient Detection").tag(0)
-                Text("Keyboard Mapping").tag(1)
+            HStack {
+                Picker("", selection: $selectedTab) {
+                    Label("Transient Detection", systemImage: "waveform.badge.magnifyingglass")
+                        .tag(0)
+                    Label("Keyboard Mapping", systemImage: "piano")
+                        .tag(1)
+                }
+                .pickerStyle(SegmentedPickerStyle())
+                .frame(width: 400)
+                
+                Spacer()
             }
-            .pickerStyle(SegmentedPickerStyle())
             .padding()
+            .background(Color.gray.opacity(0.05))
             
             if selectedTab == 0 {
                 // Transient Detection View
@@ -58,7 +66,70 @@ struct ContentView: View {
     // MARK: - Transient Detection View
     
     private var transientDetectionView: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 16) {
+            // Inspection Mode Banner & Controls
+            if audioViewModel.isInspectingTransients {
+                VStack(spacing: 12) {
+                    HStack {
+                        Image(systemName: "magnifyingglass.circle.fill")
+                            .font(.title2)
+                            .foregroundColor(.purple)
+                        
+                        Text("INSPECTION MODE")
+                            .font(.headline)
+                            .foregroundColor(.purple)
+                        
+                        Spacer()
+                        
+                        // Navigation controls
+                        HStack(spacing: 16) {
+                            Button(action: {
+                                audioViewModel.previousTransient()
+                            }) {
+                                Image(systemName: "chevron.left")
+                            }
+                            
+                            Text("\(audioViewModel.currentTransientIndex + 1) / \(audioViewModel.markers.count)")
+                                .font(.system(.body, design: .monospaced))
+                                .foregroundColor(.primary)
+                            
+                            Button(action: {
+                                audioViewModel.nextTransient()
+                            }) {
+                                Image(systemName: "chevron.right")
+                            }
+                            
+                            Divider()
+                                .frame(height: 20)
+                            
+                            // Merge button
+                            Button(action: {
+                                audioViewModel.mergeWithNextRegion()
+                            }) {
+                                Label("Merge", systemImage: "arrow.merge")
+                            }
+                            .disabled(audioViewModel.currentTransientIndex >= audioViewModel.markers.count - 1)
+                            
+                            Divider()
+                                .frame(height: 20)
+                            
+                            Button(action: {
+                                audioViewModel.stopTransientInspection()
+                            }) {
+                                Label("Exit Inspection", systemImage: "xmark.circle.fill")
+                                    .foregroundColor(.red)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                    .padding()
+                    .background(Color.purple.opacity(0.1))
+                    .cornerRadius(10)
+                }
+                .padding(.horizontal)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+            
             // Header
             HStack {
                 Text("Transient Detection & Grouping")
@@ -71,20 +142,13 @@ struct ContentView: View {
                     Label("Import WAV", systemImage: "waveform")
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(audioViewModel.isInspectingTransients)
+                .opacity(audioViewModel.isInspectingTransients ? 0.5 : 1.0)
             }
             .padding(.horizontal)
             
             // Main waveform
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Waveform")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    
-                    Spacer()
-                }
-                .padding(.horizontal)
-                
+            VStack(spacing: 0) {
                 ZStack(alignment: .top) {
                     VStack(spacing: 0) {
                         // Marker handles above waveform
@@ -147,28 +211,47 @@ struct ContentView: View {
             }
             
             // Minimap
-            MinimapView(viewModel: audioViewModel)
-                .padding(.horizontal)
+            VStack(spacing: 0) {
+                MinimapView(viewModel: audioViewModel)
+                    .frame(height: 60)
+                    .background(Color.gray.opacity(0.05))
+                    .cornerRadius(8)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+                    )
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
             
             // Transport controls
             HStack {
-                Button(action: {
-                    audioViewModel.playSelection()
-                }) {
-                    Image(systemName: audioViewModel.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.title2)
+                GroupBox {
+                    HStack(spacing: 12) {
+                        Button(action: {
+                            audioViewModel.playSelection()
+                        }) {
+                            Image(systemName: audioViewModel.isPlaying ? "pause.fill" : "play.fill")
+                                .font(.title2)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(audioViewModel.sampleBuffer == nil)
+                        
+                        Button(action: {
+                            audioViewModel.stopPlayback()
+                        }) {
+                            Image(systemName: "stop.fill")
+                                .font(.title2)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!audioViewModel.isPlaying)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                } label: {
+                    Text("Transport")
+                        .font(.caption)
                 }
-                .buttonStyle(.bordered)
-                .disabled(audioViewModel.sampleBuffer == nil)
-                
-                Button(action: {
-                    audioViewModel.stopPlayback()
-                }) {
-                    Image(systemName: "stop.fill")
-                        .font(.title2)
-                }
-                .buttonStyle(.bordered)
-                .disabled(!audioViewModel.isPlaying)
                 
                 Spacer()
             }
@@ -178,12 +261,9 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 // Main controls section
                 HStack(alignment: .top, spacing: 20) {
-                    // View controls group (moved to left)
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("VIEW CONTROLS")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .fontWeight(.semibold)
+                    // View controls group
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 8) {
                         
                         HStack(spacing: 12) {
                             if audioViewModel.tempSelection != nil {
@@ -240,17 +320,16 @@ struct ContentView: View {
                                 }
                             }
                         }
+                        }
+                    } label: {
+                        Label("View Controls", systemImage: "eye")
+                            .font(.caption)
                     }
+                    .frame(width: 220)
                     
-                    Divider()
-                        .frame(height: 100)
-                    
-                    // Transient controls group (moved to center)
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("TRANSIENT DETECTION")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .fontWeight(.semibold)
+                    // Transient controls group
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 8) {
                         
                         HStack(spacing: 8) {
                             Button(action: {
@@ -374,17 +453,18 @@ struct ContentView: View {
                                 }
                             }
                         }
+                        }
+                    } label: {
+                        Label("Transient Detection", systemImage: "waveform.badge.plus")
+                            .font(.caption)
                     }
+                    .frame(width: 240)
+                    .disabled(audioViewModel.isInspectingTransients)
+                    .opacity(audioViewModel.isInspectingTransients ? 0.5 : 1.0)
                     
-                    Divider()
-                        .frame(height: 100)
-                    
-                    // Groups section (new)
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("GROUPS")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .fontWeight(.semibold)
+                    // Groups section
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 8) {
                         
                         Toggle("Auto-assign groups", isOn: $audioViewModel.autoAssignGroups)
                             .toggleStyle(.checkbox)
@@ -397,7 +477,14 @@ struct ContentView: View {
                                 .font(.caption)
                         }
                         .disabled(audioViewModel.markers.filter { $0.group != nil }.isEmpty)
+                        }
+                    } label: {
+                        Label("Groups", systemImage: "rectangle.3.group")
+                            .font(.caption)
                     }
+                    .frame(width: 180)
+                    .disabled(audioViewModel.isInspectingTransients)
+                    .opacity(audioViewModel.isInspectingTransients ? 0.5 : 1.0)
                     
                     Spacer()
                 }
@@ -721,11 +808,20 @@ struct MarkerHandle: View {
         let x = audioViewModel.xPosition(for: marker.samplePosition, in: geometry.size.width)
 
         if x >= 0 && x <= geometry.size.width {
-            Circle()
-                .fill(marker.group == nil ? Color.red : Color.green)
-                .frame(width: 12, height: 12)
-                .overlay(Circle().stroke(Color.white, lineWidth: 1))
-                .position(x: x, y: 6)
+            ZStack {
+                Circle()
+                    .fill(marker.group == nil ? Color.red : Color.green)
+                    .frame(width: 12, height: 12)
+                    .overlay(Circle().stroke(Color.white, lineWidth: 1))
+                
+                // Show group number if assigned
+                if let group = marker.group {
+                    Text("\(group)")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(.white)
+                }
+            }
+            .position(x: x, y: 6)
                 .highPriorityGesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { value in
