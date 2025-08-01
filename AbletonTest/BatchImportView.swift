@@ -148,8 +148,10 @@ struct BatchImportView: View {
                 var batchSamples: [(url: URL, velocityRange: (min: Int, max: Int), roundRobinIndex: Int)] = []
                 
                 for sample in samples {
-                    // Add .wav extension if not present
-                    let fileNameToMatch = sample.originalFileName.hasSuffix(".wav") ? sample.originalFileName : "\(sample.originalFileName).wav"
+                    // Check for any supported audio extension
+                    let supportedExtensions = ["wav", "aif", "aiff", "mp3", "m4a"]
+                    let hasExtension = supportedExtensions.contains { sample.originalFileName.hasSuffix(".\($0)") }
+                    let fileNameToMatch = hasExtension ? sample.originalFileName : "\(sample.originalFileName).wav"
                     if let url = fileURLs.first(where: { $0.lastPathComponent == fileNameToMatch }) {
                         let velocityRange = sample.velocityRange ?? (min: 0, max: 127)
                         let rrIndex = sample.roundRobinIndex ?? 1

@@ -207,7 +207,7 @@ struct KeyView: View {
                         fileURL = url
                     }
                     
-                    if let url = fileURL, url.pathExtension.lowercased() == "wav" {
+                    if let url = fileURL, ["wav", "aif", "aiff", "mp3", "m4a"].contains(url.pathExtension.lowercased()) {
                         collectedURLs.append(url)
                     }
                 }
@@ -463,7 +463,7 @@ struct RoundRobinSlot: View {
                 provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { (item, error) in
                     if let urlData = item as? Data,
                        let url = URL(dataRepresentation: urlData, relativeTo: nil),
-                       url.pathExtension.lowercased() == "wav" {
+                       ["wav", "aif", "aiff", "mp3", "m4a"].contains(url.pathExtension.lowercased()) {
                         DispatchQueue.main.async {
                             onDrop(url)
                         }

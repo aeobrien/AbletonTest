@@ -772,7 +772,7 @@ struct ContentView: View {
         .padding(.vertical)
         .fileImporter(
                 isPresented: $audioViewModel.showImporter,
-                allowedContentTypes: [.wav]
+                allowedContentTypes: [.wav, .aiff, .mp3, .mpeg4Audio]
             ) { result in
                 if case .success(let url) = result {
                     if url.startAccessingSecurityScopedResource() {
@@ -815,7 +815,7 @@ struct ContentView: View {
                         // Show file picker for batch import
                         let panel = NSOpenPanel()
                         panel.allowsMultipleSelection = true
-                        panel.allowedContentTypes = [.wav]
+                        panel.allowedContentTypes = [.wav, .aiff, .mp3, .mpeg4Audio]
                         panel.begin { response in
                             if response == .OK {
                                 self.batchImportURLs = panel.urls

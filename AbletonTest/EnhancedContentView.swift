@@ -2248,7 +2248,7 @@ struct EnhancedWaveformView: View {
                     fileURL = url
                 }
                 
-                if let url = fileURL, url.pathExtension.lowercased() == "wav" {
+                if let url = fileURL, ["wav", "aif", "aiff", "mp3", "m4a"].contains(url.pathExtension.lowercased()) {
                     DispatchQueue.main.async {
                         // Access the file directly without security-scoped resource
                         viewModel.importWAV(from: url)
@@ -2266,7 +2266,7 @@ struct EnhancedWaveformView: View {
                         RoundedRectangle(cornerRadius: 8)
                             .fill(Color.blue.opacity(0.1))
                             .allowsHitTesting(false)
-                        Text("Drop WAV file here")
+                        Text("Drop audio file here (WAV, AIF, AIFF, MP3, M4A)")
                             .font(.headline)
                             .foregroundColor(.blue)
                     }
@@ -2754,7 +2754,7 @@ struct EnhancedContentView: View {
         .padding(.vertical)
         .fileImporter(
             isPresented: $viewModel.showImporter,
-            allowedContentTypes: [.wav]
+            allowedContentTypes: [.wav, .aiff, .mp3, .mpeg4Audio]
         ) { result in
             if case .success(let url) = result {
                 if url.startAccessingSecurityScopedResource() {
