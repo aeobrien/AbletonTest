@@ -199,6 +199,7 @@ enum VelocitySplitMode {
 enum MappingMode {
     case standard // Default, one sample per trigger
     case roundRobin // Cycle through samples mapped to the same note
+    case multipleKeys // Each group maps to a single key, round robin within that group
 }
 
 // MARK: - Transient Group Integration

@@ -18,10 +18,28 @@ struct ContentView: View {
     @State private var selectedGroups: Set<Int> = []
     @State private var targetKeyId: Int?
     @State private var splitMode: VelocitySplitMode = .separate
+    @State private var mappingMode: MappingMode = .standard
     @State private var isPitchedMode = false
     @State private var keyRangeMin = 0
     @State private var keyRangeMax = 127
     @State private var rootKey = 60
+    @State private var selectedGroupForAssignment = 1
+    
+    // Computed properties
+    var hasGroups: Bool {
+        !audioViewModel.markerGroups.isEmpty
+    }
+    
+    var mappingButtonText: String {
+        switch mappingMode {
+        case .standard:
+            return "Map to Single Key"
+        case .roundRobin:
+            return "Map to Pitched Range"
+        case .multipleKeys:
+            return "Map to Multiple Keys"
+        }
+    }
     
     var body: some View {
         VStack(spacing: 0) {
@@ -143,103 +161,578 @@ struct ContentView: View {
     
     // MARK: - Transient Detection View
     
-    private var transientDetectionView: some View {
-        VStack(spacing: 16) {
-            // Inspection Mode Banner & Controls
-            if audioViewModel.isInspectingTransients {
-                VStack(spacing: 12) {
+    @ViewBuilder
+    private var inspectionModeBanner: some View {
+        if audioViewModel.isInspectingTransients {
+            VStack(spacing: 12) {
+                HStack {
+                    Image(systemName: "magnifyingglass.circle.fill")
+                        .font(.title2)
+                        .foregroundColor(.purple)
+                    
+                    Text("INSPECTION MODE")
+                        .font(.headline)
+                        .foregroundColor(.purple)
+                    
+                    Spacer()
+                    
+                    // Auto features checkboxes
+                    HStack(spacing: 16) {
+                        Toggle("Auto Advance", isOn: $audioViewModel.autoAdvance)
+                            .toggleStyle(.checkbox)
+                            .font(.caption)
+                        
+                        Toggle("Auto Audition", isOn: $audioViewModel.autoAudition)
+                            .toggleStyle(.checkbox)
+                            .font(.caption)
+                        
+                        if audioViewModel.autoAudition {
+                            HStack(spacing: 4) {
+                                Text("Loop:")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                Slider(value: $audioViewModel.auditionLoopDuration, in: 0.2...1.0)
+                                    .frame(width: 80)
+                                Text(String(format: "%.1fs", audioViewModel.auditionLoopDuration))
+                                    .font(.caption2)
+                                    .frame(width: 30)
+                            }
+                        }
+                    }
+                    
+                    Spacer()
+                    
+                    // Navigation controls
+                    HStack(spacing: 16) {
+                        Button(action: {
+                            audioViewModel.previousTransient()
+                        }) {
+                            Image(systemName: "chevron.left")
+                        }
+                        
+                        Text("\(audioViewModel.currentTransientIndex + 1) / \(audioViewModel.markers.count)")
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundColor(.primary)
+                        
+                        Button(action: {
+                            audioViewModel.nextTransient()
+                        }) {
+                            Image(systemName: "chevron.right")
+                        }
+                        
+                        Divider()
+                            .frame(height: 20)
+                        
+                        // Merge buttons
+                        Button(action: {
+                            audioViewModel.mergeWithPreviousRegion()
+                        }) {
+                            Label("Merge Prev", systemImage: "arrow.merge")
+                        }
+                        .disabled(audioViewModel.currentTransientIndex <= 0)
+                        
+                        Button(action: {
+                            audioViewModel.mergeWithNextRegion()
+                        }) {
+                            Label("Merge Next", systemImage: "arrow.merge")
+                        }
+                        .disabled(audioViewModel.currentTransientIndex >= audioViewModel.markers.count - 1)
+                        
+                        Divider()
+                            .frame(height: 20)
+                        
+                        Button(action: {
+                            audioViewModel.stopTransientInspection()
+                        }) {
+                            Label("Exit Inspection", systemImage: "xmark.circle.fill")
+                                .foregroundColor(.red)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+                .padding()
+                .background(Color.purple.opacity(0.1))
+                .cornerRadius(10)
+            }
+            .padding(.horizontal)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+    
+    @ViewBuilder
+    private var waveformControls: some View {
+        HStack(spacing: 16) {
+            // Show transient markers checkbox
+            Toggle("Show Transient Markers", isOn: $audioViewModel.showTransientMarkers)
+                .toggleStyle(.checkbox)
+                .font(.caption)
+                .disabled(audioViewModel.markers.isEmpty)
+                .opacity(audioViewModel.markers.isEmpty ? 0.5 : 1.0)
+            
+            // Show region highlights checkbox
+            Toggle("Show Region Highlights", isOn: $audioViewModel.showRegionHighlights)
+                .toggleStyle(.checkbox)
+                .font(.caption)
+                .disabled(audioViewModel.markers.isEmpty)
+                .opacity(audioViewModel.markers.isEmpty ? 0.5 : 1.0)
+            
+            Spacer()
+            
+            // Transport buttons in the center
+            HStack(spacing: 20) {
+                Button(action: {
+                    audioViewModel.playSelection()
+                }) {
+                    Image(systemName: audioViewModel.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                        .font(.system(size: 36))
+                }
+                .buttonStyle(.plain)
+                .disabled(audioViewModel.sampleBuffer == nil)
+                
+                Button(action: {
+                    audioViewModel.stopPlayback()
+                }) {
+                    Image(systemName: "stop.circle.fill")
+                        .font(.system(size: 36))
+                }
+                .buttonStyle(.plain)
+                .disabled(!audioViewModel.isPlaying)
+            }
+            
+            Spacer()
+            
+            if audioViewModel.tempSelection != nil {
+                Button(action: {
+                    audioViewModel.clearSelection()
+                }) {
+                    Text("Clear Selection")
+                        .font(.caption)
+                }
+                .foregroundColor(.secondary)
+                
+                Button(action: {
+                    audioViewModel.zoomToSelection()
+                }) {
+                    Label("Zoom to Selection", systemImage: "viewfinder")
+                        .font(.caption)
+                }
+            }
+            
+            // Zoom controls
+            HStack(spacing: 20) {
+                // Zoom X control
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Zoom X")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
                     HStack {
-                        Image(systemName: "magnifyingglass.circle.fill")
-                            .font(.title2)
-                            .foregroundColor(.purple)
-                        
-                        Text("INSPECTION MODE")
-                            .font(.headline)
-                            .foregroundColor(.purple)
-                        
-                        Spacer()
-                        
-                        // Auto features checkboxes
-                        HStack(spacing: 16) {
-                            Toggle("Auto Advance", isOn: $audioViewModel.autoAdvance)
-                                .toggleStyle(.checkbox)
-                                .font(.caption)
+                        Slider(
+                            value: Binding(
+                                get: { audioViewModel.zoomLevel },
+                                set: { newZoom in
+                                    audioViewModel.zoom(by: newZoom / audioViewModel.zoomLevel, at: 0.5, in: 1.0)
+                                }
+                            ),
+                            in: 1...500
+                        )
+                        .frame(width: 120)
+                        Text(String(format: "%.0fx", audioViewModel.zoomLevel))
+                            .font(.caption)
+                            .frame(width: 35)
+                    }
+                }
+                
+                // Zoom Y control
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Zoom Y")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    HStack {
+                        Slider(value: $audioViewModel.yScale, in: 0.01...20.0)
+                            .frame(width: 120)
+                        Text(String(format: "%.1fx", audioViewModel.yScale))
+                            .font(.caption)
+                            .frame(width: 35)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+    }
+    
+    @ViewBuilder
+    private var mainWaveformSection: some View {
+        VStack(spacing: 0) {
+            ZStack(alignment: .top) {
+                VStack(spacing: 0) {
+                    // Marker handles above waveform
+                    GeometryReader { geometry in
+                        if audioViewModel.isInspectingTransients {
+                            // In inspection mode, only show current and next marker handles
+                            let sortedMarkers = audioViewModel.markers.sorted { $0.samplePosition < $1.samplePosition }
+                            let currentIndex = audioViewModel.currentTransientIndex
                             
-                            Toggle("Auto Audition", isOn: $audioViewModel.autoAudition)
-                                .toggleStyle(.checkbox)
-                                .font(.caption)
+                            if currentIndex < sortedMarkers.count {
+                                // Current marker handle
+                                if let currentMarkerIndex = audioViewModel.markers.firstIndex(where: { $0.id == sortedMarkers[currentIndex].id }) {
+                                    MarkerHandle(
+                                        marker: audioViewModel.markers[currentMarkerIndex],
+                                        markerIndex: currentMarkerIndex,
+                                        geometry: geometry,
+                                        audioViewModel: audioViewModel
+                                    )
+                                    
+                                    // Next marker handle (grey)
+                                    if currentIndex + 1 < sortedMarkers.count {
+                                        if let nextMarkerIndex = audioViewModel.markers.firstIndex(where: { $0.id == sortedMarkers[currentIndex + 1].id }) {
+                                            MarkerHandle(
+                                                marker: audioViewModel.markers[nextMarkerIndex],
+                                                markerIndex: nextMarkerIndex,
+                                                geometry: geometry,
+                                                audioViewModel: audioViewModel,
+                                                isGrey: true
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        } else if audioViewModel.showTransientMarkers {
+                            // Normal mode - show all handles
+                            ForEach(audioViewModel.markers.indices, id: \.self) { index in
+                                MarkerHandle(
+                                    marker: audioViewModel.markers[index],
+                                    markerIndex: index,
+                                    geometry: geometry,
+                                    audioViewModel: audioViewModel
+                                )
+                            }
+                        }
+                    }
+                    .frame(height: 12)
+                    
+                    EnhancedWaveformView(viewModel: audioViewModel)
+                        .clipped()
+                        .overlay(
+                            Group {
+                                if audioViewModel.isDetectingTransients {
+                                    ZStack {
+                                        // Semi-transparent overlay
+                                        Color.black.opacity(0.3)
+                                        
+                                        // Loading indicator
+                                        VStack(spacing: 16) {
+                                            ProgressView()
+                                                .progressViewStyle(CircularProgressViewStyle())
+                                                .scaleEffect(1.5)
+                                                .tint(.white)
+                                            
+                                            Text("Detecting Transients...")
+                                                .font(.headline)
+                                                .foregroundColor(.white)
+                                        }
+                                        .padding(24)
+                                        .background(Color.black.opacity(0.7))
+                                        .cornerRadius(12)
+                                    }
+                                    .transition(.opacity)
+                                }
+                            }
+                        )
+                        .animation(.easeInOut(duration: 0.3), value: audioViewModel.isDetectingTransients)
+                    
+                    // Marker play buttons and end handles below waveform
+                    GeometryReader { geometry in
+                        if audioViewModel.isInspectingTransients {
+                            // In inspection mode, only show play button for current marker
+                            let sortedMarkers = audioViewModel.markers.sorted { $0.samplePosition < $1.samplePosition }
+                            let currentIndex = audioViewModel.currentTransientIndex
                             
-                            if audioViewModel.autoAudition {
-                                HStack(spacing: 4) {
-                                    Text("Loop:")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                    Slider(value: $audioViewModel.auditionLoopDuration, in: 0.2...1.0)
-                                        .frame(width: 80)
-                                    Text(String(format: "%.1fs", audioViewModel.auditionLoopDuration))
-                                        .font(.caption2)
-                                        .frame(width: 30)
+                            if currentIndex < sortedMarkers.count {
+                                let currentMarker = sortedMarkers[currentIndex]
+                                let x = audioViewModel.xPosition(for: currentMarker.samplePosition, in: geometry.size.width)
+                                
+                                if x >= 0 && x <= geometry.size.width {
+                                    Button(action: {
+                                        audioViewModel.playMarkerRegion(marker: currentMarker)
+                                    }) {
+                                        Image(systemName: "play.circle.fill")
+                                            .font(.system(size: 16))
+                                            .foregroundColor(.purple)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .position(x: x, y: 6)
+                                }
+                                
+                                // Show end handle as a square for the current marker
+                                if let currentMarkerIndex = audioViewModel.markers.firstIndex(where: { $0.id == currentMarker.id }) {
+                                    RegionEndHandle(
+                                        marker: audioViewModel.markers[currentMarkerIndex],
+                                        markerIndex: currentMarkerIndex,
+                                        geometry: geometry,
+                                        audioViewModel: audioViewModel
+                                    )
+                                }
+                            }
+                        } else if audioViewModel.showTransientMarkers {
+                            // Normal mode - show all play buttons
+                            ForEach(audioViewModel.markers) { marker in
+                                let x = audioViewModel.xPosition(for: marker.samplePosition, in: geometry.size.width)
+                                
+                                if x >= 0 && x <= geometry.size.width {
+                                    Button(action: {
+                                        audioViewModel.playMarkerRegion(marker: marker)
+                                    }) {
+                                        Image(systemName: "play.circle.fill")
+                                            .font(.system(size: 16))
+                                            .foregroundColor(marker.group == nil ? .red : .green)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .position(x: x, y: 6)
                                 }
                             }
                         }
+                    }
+                    .frame(height: 12)
+                }
+            }
+        }
+        .padding(.horizontal)
+    }
+    
+    @ViewBuilder 
+    private var controlsSection: some View {
+        VStack(spacing: 0) {
+            // Main controls section
+            HStack(alignment: .top, spacing: 30) {
+                
+                // Transient controls group
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 16) {
                         
-                        Spacer()
+                        // Algorithm selection at the top
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Algorithm")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            Picker("", selection: $audioViewModel.selectedDetectionAlgorithm) {
+                                ForEach(TransientDetectionAlgorithm.allCases, id: \.self) { algorithm in
+                                    Text(algorithm.displayName).tag(algorithm)
+                                }
+                            }
+                            .pickerStyle(MenuPickerStyle())
+                            .frame(width: 200)
+                        }
                         
-                        // Navigation controls
-                        HStack(spacing: 16) {
+                        // Threshold slider
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Threshold")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            HStack {
+                                Slider(
+                                    value: Binding(
+                                        get: { audioViewModel.transientThreshold },
+                                        set: { audioViewModel.updateTransientThreshold($0) }
+                                    ),
+                                    in: 0.001...2.0
+                                )
+                                .frame(width: 250)
+                                Text(String(format: "%.2f", audioViewModel.transientThreshold))
+                                    .font(.caption)
+                                    .frame(width: 35)
+                            }
+                        }
+                        
+                        // Offset slider
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Offset (ms)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            HStack {
+                                Slider(
+                                    value: Binding(
+                                        get: { audioViewModel.transientOffsetMs },
+                                        set: { newValue in
+                                            let oldValue = audioViewModel.transientOffsetMs
+                                            audioViewModel.transientOffsetMs = newValue
+                                            if audioViewModel.hasDetectedTransients {
+                                                audioViewModel.updateTransientOffsets(oldOffset: oldValue, newOffset: newValue)
+                                            }
+                                        }
+                                    ),
+                                    in: -50...50
+                                )
+                                .frame(width: 250)
+                                Text(String(format: "%.1f", audioViewModel.transientOffsetMs))
+                                    .font(.caption)
+                                    .frame(width: 35)
+                            }
+                        }
+                        
+                        // Buttons row
+                        HStack(spacing: 12) {
                             Button(action: {
-                                audioViewModel.previousTransient()
+                                print("Detect button pressed")
+                                audioViewModel.detectTransients()
                             }) {
-                                Image(systemName: "chevron.left")
+                                HStack(spacing: 4) {
+                                    if audioViewModel.isDetectingTransients {
+                                        ProgressView()
+                                            .progressViewStyle(CircularProgressViewStyle())
+                                            .scaleEffect(0.7)
+                                    } else {
+                                        Image(systemName: "waveform.badge.plus")
+                                    }
+                                    Text("Detect")
+                                        .font(.caption)
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(audioViewModel.sampleBuffer == nil || audioViewModel.isDetectingTransients)
+                            
+                            if !audioViewModel.markers.isEmpty && !audioViewModel.isInspectingTransients {
+                                Button(action: {
+                                    audioViewModel.startTransientInspection()
+                                }) {
+                                    Label("Inspect Regions", systemImage: "magnifyingglass")
+                                        .font(.caption)
+                                }
                             }
                             
-                            Text("\(audioViewModel.currentTransientIndex + 1) / \(audioViewModel.markers.count)")
-                                .font(.system(.body, design: .monospaced))
-                                .foregroundColor(.primary)
-                            
                             Button(action: {
-                                audioViewModel.nextTransient()
+                                audioViewModel.markers.removeAll()
+                                audioViewModel.transientMarkers.removeAll()
+                                audioViewModel.hasDetectedTransients = false
                             }) {
-                                Image(systemName: "chevron.right")
+                                Text("Clear All")
+                                    .font(.caption)
+                            }
+                            .foregroundColor(.red)
+                            .disabled(audioViewModel.markers.isEmpty)
+                        }
+                        
+                        Spacer(minLength: 0)
+                    }
+                } label: {
+                    Label("Transient Detection", systemImage: "waveform.badge.plus")
+                        .font(.caption)
+                }
+                .frame(minWidth: 400)
+                .frame(minHeight: 180)
+                .disabled(audioViewModel.isInspectingTransients)
+                .opacity(audioViewModel.isInspectingTransients ? 0.5 : 1.0)
+                
+                // Groups section
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 12) {
+                        
+                        Toggle("Auto-assign groups", isOn: $audioViewModel.autoAssignGroups)
+                            .toggleStyle(.checkbox)
+                            .font(.caption)
+                        
+                        Divider()
+                        
+                        // Group assignment controls
+                        VStack(alignment: .leading, spacing: 12) {
+                            let range = audioViewModel.pendingGroupAssignment ?? audioViewModel.tempSelection
+                            let selectedMarkerCount = range != nil ? audioViewModel.markers.filter { range!.contains($0.samplePosition) }.count : 0
+                            let hasSelection = range != nil && selectedMarkerCount > 0
+                            
+                            Text(hasSelection ? "\(selectedMarkerCount) marker\(selectedMarkerCount == 1 ? "" : "s") selected" : "No markers selected")
+                                .font(.caption)
+                                .foregroundColor(hasSelection ? .primary : .secondary)
+                            
+                            // Group picker
+                            HStack {
+                                Text("Group:")
+                                    .font(.caption)
+                                    .foregroundColor(hasSelection ? .primary : .secondary)
+                                
+                                Picker("", selection: $selectedGroupForAssignment) {
+                                    ForEach(1...10, id: \.self) { group in
+                                        Text("Group \(group)").tag(group)
+                                    }
+                                }
+                                .pickerStyle(MenuPickerStyle())
+                                .frame(width: 100)
+                                .disabled(!hasSelection)
+                                .onAppear {
+                                    selectedGroupForAssignment = (audioViewModel.markers.compactMap { $0.group }.max() ?? 0) + 1
+                                }
+                                
+                                Spacer()
+                                
+                                Button(action: {
+                                    audioViewModel.assignToGroup(selectedGroupForAssignment)
+                                }) {
+                                    Text("Assign")
+                                        .font(.caption)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(!hasSelection)
                             }
                             
-                            Divider()
-                                .frame(height: 20)
-                            
-                            // Merge buttons
+                            // Sequential button
                             Button(action: {
-                                audioViewModel.mergeWithPreviousRegion()
+                                audioViewModel.assignIncrementally()
                             }) {
-                                Label("Merge Prev", systemImage: "arrow.merge")
-                            }
-                            .disabled(audioViewModel.currentTransientIndex <= 0)
-                            
-                            Button(action: {
-                                audioViewModel.mergeWithNextRegion()
-                            }) {
-                                Label("Merge Next", systemImage: "arrow.merge")
-                            }
-                            .disabled(audioViewModel.currentTransientIndex >= audioViewModel.markers.count - 1)
-                            
-                            Divider()
-                                .frame(height: 20)
-                            
-                            Button(action: {
-                                audioViewModel.stopTransientInspection()
-                            }) {
-                                Label("Exit Inspection", systemImage: "xmark.circle.fill")
-                                    .foregroundColor(.red)
+                                Label("Assign Sequentially", systemImage: "number")
+                                    .font(.caption)
                             }
                             .buttonStyle(.bordered)
+                            .help("Assign incrementally (1, 2, 3...)")
+                            .disabled(!hasSelection || selectedMarkerCount < 2)
+                            
+                            // Unassign button
+                            Button(action: {
+                                audioViewModel.unassignFromGroups()
+                            }) {
+                                Label("Unassign Groups", systemImage: "minus.circle")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(!hasSelection)
+                            
+                            if hasSelection {
+                                Button(action: {
+                                    audioViewModel.clearSelection()
+                                }) {
+                                    Label("Clear Selection", systemImage: "xmark.circle")
+                                        .font(.caption)
+                                }
+                                .foregroundColor(.secondary)
+                            }
                         }
+                        .opacity(audioViewModel.pendingGroupAssignment != nil || audioViewModel.tempSelection != nil ? 1.0 : 0.6)
+                        
+                        Spacer(minLength: 0)
                     }
-                    .padding()
-                    .background(Color.purple.opacity(0.1))
-                    .cornerRadius(10)
+                } label: {
+                    Label("Groups", systemImage: "rectangle.3.group")
+                        .font(.caption)
                 }
-                .padding(.horizontal)
-                .transition(.move(edge: .top).combined(with: .opacity))
+                .frame(width: 340)
+                .frame(minHeight: 180)
+                .disabled(audioViewModel.isInspectingTransients)
+                .opacity(audioViewModel.isInspectingTransients ? 0.5 : 1.0)
+                
+                // Mapping section (always visible, disabled when no groups)
+                mappingSection
+                
+                Spacer()
             }
+            .padding()
+            .background(Color.gray.opacity(0.05))
+            .cornerRadius(8)
+            .padding(.horizontal)
+        }
+    }
+    
+    private var transientDetectionView: some View {
+        VStack(spacing: 16) {
+            // Inspection Mode Banner
+            inspectionModeBanner
             
             // Header
             HStack {
@@ -251,461 +744,33 @@ struct ContentView: View {
             }
             .padding(.horizontal)
             
-            // View controls above waveform
-            HStack(spacing: 16) {
-                // Show transient markers checkbox
-                Toggle("Show Transient Markers", isOn: $audioViewModel.showTransientMarkers)
-                    .toggleStyle(.checkbox)
-                    .font(.caption)
-                    .disabled(audioViewModel.markers.isEmpty)
-                    .opacity(audioViewModel.markers.isEmpty ? 0.5 : 1.0)
-                
-                Spacer()
-                
-                if audioViewModel.tempSelection != nil {
-                    Button(action: {
-                        audioViewModel.clearSelection()
-                    }) {
-                        Text("Clear Selection")
-                            .font(.caption)
-                    }
-                    .foregroundColor(.secondary)
-                    
-                    Button(action: {
-                        audioViewModel.zoomToSelection()
-                    }) {
-                        Label("Zoom to Selection", systemImage: "viewfinder")
-                            .font(.caption)
-                    }
-                }
-                
-                // Zoom controls
-                HStack(spacing: 20) {
-                    // Zoom X control
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Zoom X")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                        HStack {
-                            Slider(
-                                value: Binding(
-                                    get: { audioViewModel.zoomLevel },
-                                    set: { newZoom in
-                                        audioViewModel.zoom(by: newZoom / audioViewModel.zoomLevel, at: 0.5, in: 1.0)
-                                    }
-                                ),
-                                in: 1...500
-                            )
-                            .frame(width: 120)
-                            Text(String(format: "%.0fx", audioViewModel.zoomLevel))
-                                .font(.caption)
-                                .frame(width: 35)
-                        }
-                    }
-                    
-                    // Zoom Y control
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Zoom Y")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                        HStack {
-                            Slider(value: $audioViewModel.yScale, in: 0.01...20.0)
-                                .frame(width: 120)
-                            Text(String(format: "%.1fx", audioViewModel.yScale))
-                                .font(.caption)
-                                .frame(width: 35)
-                        }
-                    }
-                }
+            // Combined transport and view controls above waveform
+            waveformControls
+            
+            // Main waveform
+            mainWaveformSection
+            
+            // Minimap
+            VStack(spacing: 0) {
+                MinimapView(viewModel: audioViewModel)
+                    .frame(height: 60)
+                    .background(Color.gray.opacity(0.05))
+                    .cornerRadius(8)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+                    )
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
             
-            // Main waveform
-            VStack(spacing: 0) {
-                ZStack(alignment: .top) {
-                    VStack(spacing: 0) {
-                            // Marker handles above waveform
-                            GeometryReader { geometry in
-                                if audioViewModel.isInspectingTransients {
-                                    // In inspection mode, only show current and next marker handles
-                                    let sortedMarkers = audioViewModel.markers.sorted { $0.samplePosition < $1.samplePosition }
-                                    let currentIndex = audioViewModel.currentTransientIndex
-                                    
-                                    if currentIndex < sortedMarkers.count {
-                                        // Current marker handle
-                                        if let currentMarkerIndex = audioViewModel.markers.firstIndex(where: { $0.id == sortedMarkers[currentIndex].id }) {
-                                            MarkerHandle(
-                                                marker: audioViewModel.markers[currentMarkerIndex],
-                                                markerIndex: currentMarkerIndex,
-                                                geometry: geometry,
-                                                audioViewModel: audioViewModel
-                                            )
-                                            
-                                            // Next marker handle (grey)
-                                            if currentIndex + 1 < sortedMarkers.count {
-                                                if let nextMarkerIndex = audioViewModel.markers.firstIndex(where: { $0.id == sortedMarkers[currentIndex + 1].id }) {
-                                                    MarkerHandle(
-                                                        marker: audioViewModel.markers[nextMarkerIndex],
-                                                        markerIndex: nextMarkerIndex,
-                                                        geometry: geometry,
-                                                        audioViewModel: audioViewModel,
-                                                        isGrey: true
-                                                    )
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else if audioViewModel.showTransientMarkers {
-                                    // Normal mode - show all handles
-                                    ForEach(audioViewModel.markers.indices, id: \.self) { index in
-                                        MarkerHandle(
-                                            marker: audioViewModel.markers[index],
-                                            markerIndex: index,
-                                            geometry: geometry,
-                                            audioViewModel: audioViewModel
-                                        )
-                                    }
-                                }
-                            }
-                            .frame(height: 12)
-                            
-                            EnhancedWaveformView(viewModel: audioViewModel)
-                                .clipped()
-                            
-                            // Marker play buttons and end handles below waveform
-                            GeometryReader { geometry in
-                                if audioViewModel.isInspectingTransients {
-                                    // In inspection mode, only show play button for current marker
-                                    let sortedMarkers = audioViewModel.markers.sorted { $0.samplePosition < $1.samplePosition }
-                                    let currentIndex = audioViewModel.currentTransientIndex
-                                    
-                                    if currentIndex < sortedMarkers.count {
-                                        let currentMarker = sortedMarkers[currentIndex]
-                                        let x = audioViewModel.xPosition(for: currentMarker.samplePosition, in: geometry.size.width)
-                                        
-                                        if x >= 0 && x <= geometry.size.width {
-                                            Button(action: {
-                                                audioViewModel.playMarkerRegion(marker: currentMarker)
-                                            }) {
-                                                Image(systemName: "play.circle.fill")
-                                                    .font(.system(size: 16))
-                                                    .foregroundColor(.purple)
-                                            }
-                                            .buttonStyle(.plain)
-                                            .position(x: x, y: 6)
-                                        }
-                                        
-                                        // Show end handle as a square for the current marker
-                                        if let currentMarkerIndex = audioViewModel.markers.firstIndex(where: { $0.id == currentMarker.id }) {
-                                            RegionEndHandle(
-                                                marker: audioViewModel.markers[currentMarkerIndex],
-                                                markerIndex: currentMarkerIndex,
-                                                geometry: geometry,
-                                                audioViewModel: audioViewModel
-                                            )
-                                        }
-                                    }
-                                } else if audioViewModel.showTransientMarkers {
-                                    // Normal mode - show all play buttons
-                                    ForEach(audioViewModel.markers) { marker in
-                                        let x = audioViewModel.xPosition(for: marker.samplePosition, in: geometry.size.width)
-                                        
-                                        if x >= 0 && x <= geometry.size.width {
-                                            Button(action: {
-                                                audioViewModel.playMarkerRegion(marker: marker)
-                                            }) {
-                                                Image(systemName: "play.circle.fill")
-                                                    .font(.system(size: 16))
-                                                    .foregroundColor(marker.group == nil ? .red : .green)
-                                            }
-                                            .buttonStyle(.plain)
-                                            .position(x: x, y: 6)
-                                        }
-                                    }
-                                }
-                            }
-                            .frame(height: 12)
-                        }
-                }
-                .padding(.horizontal)
-            }
+            // Controls section
+            controlsSection
             
-            // Minimap
-                VStack(spacing: 0) {
-                    MinimapView(viewModel: audioViewModel)
-                        .frame(height: 60)
-                        .background(Color.gray.opacity(0.05))
-                        .cornerRadius(8)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.gray.opacity(0.2), lineWidth: 1)
-                        )
-                }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
-                
-                // Transport controls
-                HStack {
-                    GroupBox {
-                        HStack(spacing: 12) {
-                            Button(action: {
-                                audioViewModel.playSelection()
-                            }) {
-                                Image(systemName: audioViewModel.isPlaying ? "pause.fill" : "play.fill")
-                                    .font(.title2)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(audioViewModel.sampleBuffer == nil)
-                            
-                            Button(action: {
-                                audioViewModel.stopPlayback()
-                            }) {
-                                Image(systemName: "stop.fill")
-                                    .font(.title2)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(!audioViewModel.isPlaying)
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                    } label: {
-                        Text("Transport")
-                            .font(.caption)
-                    }
-                    
-                    Spacer()
-                }
-                .padding(.horizontal)
-                
-                // Reorganized controls
-                VStack(spacing: 0) {
-                    // Main controls section
-                    HStack(alignment: .top, spacing: 30) {
-                        
-                        // Transient controls group
-                        GroupBox {
-                            VStack(alignment: .leading, spacing: 12) {
-                                
-                                HStack(spacing: 12) {
-                                    Button(action: {
-                                        print("Detect button pressed")
-                                        audioViewModel.detectTransients()
-                                    }) {
-                                        HStack(spacing: 4) {
-                                            if audioViewModel.isDetectingTransients {
-                                                ProgressView()
-                                                    .progressViewStyle(CircularProgressViewStyle())
-                                                    .scaleEffect(0.7)
-                                            } else {
-                                                Image(systemName: "waveform.badge.plus")
-                                            }
-                                            Text("Detect")
-                                                .font(.caption)
-                                        }
-                                    }
-                                    .buttonStyle(.borderedProminent)
-                                    .disabled(audioViewModel.sampleBuffer == nil || audioViewModel.isDetectingTransients)
-                                    
-                                    // Algorithm selection
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("Algorithm")
-                                            .font(.caption2)
-                                            .foregroundColor(.secondary)
-                                        Picker("", selection: $audioViewModel.selectedDetectionAlgorithm) {
-                                            ForEach(TransientDetectionAlgorithm.allCases, id: \.self) { algorithm in
-                                                Text(algorithm.displayName).tag(algorithm)
-                                            }
-                                        }
-                                        .pickerStyle(MenuPickerStyle())
-                                        .frame(width: 120)
-                                    }
-                                    
-                                    if !audioViewModel.markers.isEmpty && !audioViewModel.isInspectingTransients {
-                                        Button(action: {
-                                            audioViewModel.startTransientInspection()
-                                        }) {
-                                            Label("Inspect", systemImage: "magnifyingglass")
-                                                .font(.caption)
-                                        }
-                                    }
-                                    
-                                    Button(action: {
-                                        audioViewModel.markers.removeAll()
-                                        audioViewModel.transientMarkers.removeAll()
-                                        audioViewModel.hasDetectedTransients = false
-                                    }) {
-                                        Text("Clear")
-                                            .font(.caption)
-                                    }
-                                    .foregroundColor(.red)
-                                    .disabled(audioViewModel.markers.isEmpty)
-                                }
-                                
-                                // Stacked threshold and offset
-                                HStack(spacing: 20) {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("Threshold")
-                                            .font(.caption2)
-                                            .foregroundColor(.secondary)
-                                        HStack {
-                                            Slider(
-                                                value: Binding(
-                                                    get: { audioViewModel.transientThreshold },
-                                                    set: { audioViewModel.updateTransientThreshold($0) }
-                                                ),
-                                                in: 0.001...2.0
-                                            )
-                                            .frame(width: 150)
-                                            Text(String(format: "%.2f", audioViewModel.transientThreshold))
-                                                .font(.caption)
-                                                .frame(width: 35)
-                                        }
-                                    }
-                                    
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("Offset (ms)")
-                                            .font(.caption2)
-                                            .foregroundColor(.secondary)
-                                        HStack {
-                                            Slider(
-                                                value: Binding(
-                                                    get: { audioViewModel.transientOffsetMs },
-                                                    set: { newValue in
-                                                        let oldValue = audioViewModel.transientOffsetMs
-                                                        audioViewModel.transientOffsetMs = newValue
-                                                        if audioViewModel.hasDetectedTransients {
-                                                            audioViewModel.updateTransientOffsets(oldOffset: oldValue, newOffset: newValue)
-                                                        }
-                                                    }
-                                                ),
-                                                in: -50...50
-                                            )
-                                            .frame(width: 150)
-                                            Text(String(format: "%.1f", audioViewModel.transientOffsetMs))
-                                                .font(.caption)
-                                                .frame(width: 35)
-                                        }
-                                    }
-                                }
-                            }
-                        } label: {
-                            Label("Transient Detection", systemImage: "waveform.badge.plus")
-                                .font(.caption)
-                        }
-                        .frame(minWidth: 400)
-                        .disabled(audioViewModel.isInspectingTransients)
-                        .opacity(audioViewModel.isInspectingTransients ? 0.5 : 1.0)
-                        
-                        // Groups section
-                        GroupBox {
-                            VStack(alignment: .leading, spacing: 12) {
-                                
-                                Toggle("Auto-assign groups", isOn: $audioViewModel.autoAssignGroups)
-                                    .toggleStyle(.checkbox)
-                                    .font(.caption)
-                                
-                                Divider()
-                                
-                                // Group assignment controls
-                                VStack(alignment: .leading, spacing: 8) {
-                                    let range = audioViewModel.pendingGroupAssignment ?? audioViewModel.tempSelection
-                                    let selectedMarkerCount = range != nil ? audioViewModel.markers.filter { range!.contains($0.samplePosition) }.count : 0
-                                    let hasSelection = range != nil && selectedMarkerCount > 0
-                                    
-                                    HStack {
-                                        Text(hasSelection ? "\(selectedMarkerCount) marker\(selectedMarkerCount == 1 ? "" : "s") selected" : "No markers selected")
-                                            .font(.caption)
-                                            .foregroundColor(hasSelection ? .primary : .secondary)
-                                        
-                                        Spacer()
-                                    }
-                                    
-                                    HStack(spacing: 8) {
-                                        Text("Assign to:")
-                                            .font(.caption)
-                                            .foregroundColor(hasSelection ? .primary : .secondary)
-                                        
-                                        // Group selection
-                                        Picker("", selection: Binding(
-                                            get: { 
-                                                // Default to next available group
-                                                (audioViewModel.markers.compactMap { $0.group }.max() ?? 0) + 1
-                                            },
-                                            set: { newValue in
-                                                audioViewModel.assignToGroup(newValue)
-                                            }
-                                        )) {
-                                            ForEach(1...10, id: \.self) { group in
-                                                Text("Group \(group)").tag(group)
-                                            }
-                                        }
-                                        .pickerStyle(MenuPickerStyle())
-                                        .frame(width: 80)
-                                        .disabled(!hasSelection)
-                                        
-                                        Spacer()
-                                        
-                                        Button(action: {
-                                            audioViewModel.assignIncrementally()
-                                        }) {
-                                            Label("Sequential", systemImage: "number")
-                                                .font(.caption)
-                                        }
-                                        .buttonStyle(.bordered)
-                                        .help("Assign incrementally (1, 2, 3...)")
-                                        .disabled(!hasSelection || selectedMarkerCount < 2)
-                                    }
-                                    
-                                    HStack(spacing: 8) {
-                                        Button(action: {
-                                            audioViewModel.unassignFromGroups()
-                                        }) {
-                                            Label("Unassign", systemImage: "minus.circle")
-                                                .font(.caption)
-                                        }
-                                        .buttonStyle(.bordered)
-                                        .disabled(!hasSelection)
-                                        
-                                        Spacer()
-                                        
-                                        if hasSelection {
-                                            Button(action: {
-                                                audioViewModel.clearSelection()
-                                            }) {
-                                                Label("Clear Selection", systemImage: "xmark.circle")
-                                                    .font(.caption)
-                                            }
-                                            .foregroundColor(.secondary)
-                                        }
-                                    }
-                                }
-                                .opacity(audioViewModel.pendingGroupAssignment != nil || audioViewModel.tempSelection != nil ? 1.0 : 0.6)
-                            }
-                        } label: {
-                            Label("Groups", systemImage: "rectangle.3.group")
-                                .font(.caption)
-                        }
-                        .frame(width: 340)
-                        .disabled(audioViewModel.isInspectingTransients)
-                        .opacity(audioViewModel.isInspectingTransients ? 0.5 : 1.0)
-                        
-                        // Mapping section (always visible, disabled when no groups)
-                        mappingSection
-                        
-                        Spacer()
-                    }
-                    .padding()
-                    .background(Color.gray.opacity(0.05))
-                    .cornerRadius(8)
-                    .padding(.horizontal)
-                }
-                
-                
-                Spacer()
-            }
-            .padding(.vertical)
-            .fileImporter(
+            Spacer()
+        }
+        .padding(.vertical)
+        .fileImporter(
                 isPresented: $audioViewModel.showImporter,
                 allowedContentTypes: [.wav]
             ) { result in
@@ -731,7 +796,7 @@ struct ContentView: View {
                 }
             }
         }
-    // Removed one here
+ 
     
     // MARK: - Keyboard Mapping View
     
@@ -858,7 +923,7 @@ struct ContentView: View {
         
         return GroupBox {
             HStack(alignment: .top, spacing: 20) {
-                // Left column - Group selection and mapping mode
+                // Column 1 - Group selection
                 VStack(alignment: .leading, spacing: 12) {
                     // Group selection
                     VStack(alignment: .leading, spacing: 8) {
@@ -915,30 +980,36 @@ struct ContentView: View {
                         }
                     }
                     
-                    // Mapping mode
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Mapping Mode:")
-                            .font(.caption)
-                            .bold()
-                        
-                        Picker("", selection: $isPitchedMode) {
-                            Text("Single Key").tag(false)
-                            Text("Pitched Range").tag(true)
-                        }
-                        .pickerStyle(SegmentedPickerStyle())
-                        .frame(width: 200)
-                    }
                 }
                 
                 Divider()
                     .frame(height: 180)
                 
-                // Right column - Target key and velocity mode
+                // Column 2 - Mapping settings
                 VStack(alignment: .leading, spacing: 12) {
+                    // Mapping mode selection
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Mapping Mode:")
+                            .font(.caption)
+                            .bold()
+                        
+                        Picker("", selection: $mappingMode) {
+                            Text("Single Key").tag(MappingMode.standard)
+                            Text("Pitched Range").tag(MappingMode.roundRobin)
+                            Text("Multi Key").tag(MappingMode.multipleKeys)
+                        }
+                        .pickerStyle(SegmentedPickerStyle())
+                        .frame(width: 200)
+                        .onChange(of: mappingMode) { newMode in
+                            // Update isPitchedMode based on mapping mode
+                            isPitchedMode = (newMode == .roundRobin)
+                        }
+                    }
+                    
                     // Target key selection
-                    if !isPitchedMode {
+                    if mappingMode != .roundRobin {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Target Key:")
+                            Text(mappingMode == .multipleKeys ? "Starting Key:" : "Target Key:")
                                 .font(.caption)
                                 .bold()
                             
@@ -1005,43 +1076,52 @@ struct ContentView: View {
                             }
                         }
                     }
-                    
-                    Spacer(minLength: 20)
-                    
-                    // Velocity split mode
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Velocity Mode:")
+                }
+                .frame(width: 230)
+                
+                Divider()
+                    .frame(height: 180)
+                
+                // Column 3 - Velocity mode and mapping button
+                VStack(alignment: .leading, spacing: 12) {
+                    // Velocity split mode - only show if not in Multiple Keys mode
+                    if mappingMode != .multipleKeys {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Velocity Mode:")
+                                .font(.caption)
+                                .bold()
+                            
+                            Picker("", selection: $splitMode) {
+                                Text("Separate").tag(VelocitySplitMode.separate)
+                                Text("Crossfade").tag(VelocitySplitMode.crossfade)
+                            }
+                            .pickerStyle(RadioGroupPickerStyle())
                             .font(.caption)
-                            .bold()
-                        
-                        Picker("", selection: $splitMode) {
-                            Text("Separate").tag(VelocitySplitMode.separate)
-                            Text("Crossfade").tag(VelocitySplitMode.crossfade)
                         }
-                        .pickerStyle(RadioGroupPickerStyle())
-                        .font(.caption)
                     }
                     
-                    Spacer(minLength: 20)
+                    
+                    Spacer()
                     
                     // Map button
                     Button(action: {
                         performMapping()
                     }) {
-                        Label("Map to Velocity Layers", systemImage: "layers")
+                        Label(mappingButtonText, systemImage: "layers")
                             .font(.caption)
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!hasGroups || selectedGroups.isEmpty || (!isPitchedMode && targetKeyId == nil))
+                    .disabled(!hasGroups || selectedGroups.isEmpty || (mappingMode == .standard && targetKeyId == nil))
                 }
-                .frame(width: 220)
+                .frame(width: 230)
             }
             .padding(.vertical, 8)
         } label: {
             Label("Mapping", systemImage: "layers")
                 .font(.caption)
         }
-        .frame(width: 500)
+        .frame(width: 750)
+        .frame(minHeight: 180)
         .disabled(!hasGroups)
         .opacity(hasGroups ? 1.0 : 0.5)
     }
@@ -1050,7 +1130,16 @@ struct ContentView: View {
         let markerGroups = audioViewModel.markerGroups
         let groupsToMap = markerGroups.filter { selectedGroups.contains($0.id) }
         
-        if isPitchedMode {
+        // Set the mapping mode in the sampler view model
+        samplerViewModel.currentMappingMode = mappingMode
+        
+        if mappingMode == .multipleKeys {
+            // Multiple Keys mode: Each group to its own key
+            samplerViewModel.mapGroupsToMultipleKeys(
+                groups: groupsToMap,
+                startingKey: targetKeyId ?? 60
+            )
+        } else if mappingMode == .roundRobin {
             // Map to pitched range
             samplerViewModel.mapTransientGroupsToPitchedRange(
                 groups: groupsToMap,
@@ -1356,8 +1445,8 @@ struct RegionEndHandle: View {
     var body: some View {
         let x = audioViewModel.xPosition(for: endPosition, in: geometry.size.width)
         
-        // Only show if end marker is visible
-        if x >= 0 && x <= geometry.size.width {
+        // Show if end marker is visible (including at the end of file)
+        if x >= 0 && x <= geometry.size.width + 10 {
             Rectangle()
                 .fill(Color.gray.opacity(0.6))
                 .frame(width: 10, height: 10)
@@ -1365,7 +1454,7 @@ struct RegionEndHandle: View {
                     Rectangle()
                         .stroke(Color.white, lineWidth: 1)
                 )
-                .position(x: x, y: 6)
+                .position(x: min(x, geometry.size.width), y: 6)
                 .highPriorityGesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { value in

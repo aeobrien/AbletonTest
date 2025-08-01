@@ -63,6 +63,7 @@ final class EnhancedAudioViewModel: ObservableObject {
     @Published var transientMarkers: Set<Int> = []
     @Published var hasDetectedTransients = false
     @Published var showTransientMarkers = true
+    @Published var showRegionHighlights = false
     @Published var selectedDetectionAlgorithm: TransientDetectionAlgorithm = .multiscaleTimeDomain
     @Published var isDetectingTransients = false
     
@@ -787,19 +788,21 @@ final class EnhancedAudioViewModel: ObservableObject {
     
     // MARK: Transient Detection
     func detectTransients() {
+        // Set detecting flag immediately
+        isDetectingTransients = true
+        
         Task { @MainActor in
             print("=== TRANSIENT DETECTION START ===")
             print("Using algorithm: \(selectedDetectionAlgorithm.displayName)")
+            
+            // Give UI time to update and show animation
+            try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+            
             guard let buffer = sampleBuffer else {
                 print("No sample buffer available")
+                isDetectingTransients = false
                 return
             }
-            
-            // Set detecting flag
-            isDetectingTransients = true
-            
-            // Give UI time to update
-            try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
             
             // Clear existing markers
             transientMarkers.removeAll()
@@ -2055,6 +2058,29 @@ struct EnhancedWaveformView: View {
                                     }
                                     
                                 } else {
+                                    // Show region highlights if enabled
+                                    if viewModel.showRegionHighlights {
+                                        // Draw all regions as purple highlights
+                                        let allMarkersSorted = viewModel.markers
+                                            .sorted { $0.samplePosition < $1.samplePosition }
+                                        
+                                        for marker in allMarkersSorted {
+                                            let endPosition = endOfRegion(after: marker,
+                                                                          markers: viewModel.markers,
+                                                                          totalSamples: viewModel.totalSamples)
+                                            
+                                            let startX = viewModel.xPosition(for: marker.samplePosition, in: size.width)
+                                            let endX   = viewModel.xPosition(for: endPosition, in: size.width)
+                                            
+                                            if startX <= size.width && endX >= 0 {
+                                                let x = max(0, startX)
+                                                let w = min(size.width, endX) - x
+                                                let r = CGRect(x: x, y: 0, width: w, height: size.height)
+                                                context.fill(Path(r), with: .color(.purple.opacity(0.2)))
+                                            }
+                                        }
+                                    }
+                                    
                                     // Normal mode - show all markers if enabled or in inspection mode
                                     if viewModel.showTransientMarkers || viewModel.isInspectingTransients {
                                         for marker in viewModel.markers {

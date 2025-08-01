@@ -240,6 +240,48 @@ class SamplerViewModel: ObservableObject {
         // Note: rootKey is automatically set to keyRangeMin in the struct
     }
     
+    /// Maps each group to its own key with round robin samples
+    @MainActor
+    func mapGroupsToMultipleKeys(groups: [TransientGroup], startingKey: Int) {
+        guard let audioURL = audioViewModel?.audioURL,
+              let sampleBuffer = audioViewModel?.sampleBuffer else {
+            showError("No audio file loaded")
+            return
+        }
+        
+        var currentKey = startingKey
+        
+        for group in groups {
+            // Skip if no markers
+            guard !group.markers.isEmpty else { continue }
+            
+            // Ensure key is valid
+            let keyId = min(max(currentKey, 0), 127)
+            
+            // Clear existing samples for this key
+            multiSampleParts.removeAll { $0.keyRangeMin == keyId && $0.keyRangeMax == keyId }
+            
+            // Create sample parts for each marker in the group (as round robins)
+            for (rrIndex, marker) in group.markers.enumerated() {
+                let samplePart = createSamplePartFromMarker(
+                    marker: marker,
+                    keyId: keyId,
+                    velocityRange: VelocityRangeData.fullRange,
+                    roundRobinIndex: rrIndex,
+                    audioURL: audioURL,
+                    sampleBuffer: sampleBuffer
+                )
+                multiSampleParts.append(samplePart)
+            }
+            
+            // Move to next key
+            currentKey += 1
+        }
+        
+        // Update piano key status
+        updatePianoKeySampleStatus()
+    }
+    
     private func calculateVelocityRanges(for count: Int, mode: VelocitySplitMode) -> [VelocityRangeData] {
         guard count > 0 else { return [] }
         
