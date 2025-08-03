@@ -57,7 +57,7 @@ struct ContentView: View {
                 Spacer()
                 
                 Button(action: { audioViewModel.showImporter = true }) {
-                    Label("Import WAV", systemImage: "waveform")
+                    Label("Import Audio", systemImage: "waveform")
                         .font(.system(size: 13))
                 }
                 .buttonStyle(.borderedProminent)
@@ -144,6 +144,22 @@ struct ContentView: View {
                     }
                 }
                 .keyboardShortcut(.delete, modifiers: [])
+                .hidden()
+                
+                // Play/Stop with spacebar
+                Button("") {
+                    if audioViewModel.isPlaying {
+                        audioViewModel.stopPlayback()
+                    } else {
+                        // If there's a selection, play that; otherwise play from beginning
+                        if let selection = audioViewModel.tempSelection {
+                            audioViewModel.playSelection()
+                        } else {
+                            audioViewModel.togglePlayback()
+                        }
+                    }
+                }
+                .keyboardShortcut(.space, modifiers: [])
                 .hidden()
             }
         )
@@ -297,6 +313,46 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(!audioViewModel.isPlaying)
+            }
+            
+            // Zone navigation (only show if zones exist)
+            if !audioViewModel.zones.isEmpty {
+                Divider()
+                    .frame(height: 30)
+                    .padding(.horizontal, 10)
+                
+                HStack(spacing: 12) {
+                    Button(action: {
+                        audioViewModel.previousZone()
+                    }) {
+                        Image(systemName: "chevron.left.circle")
+                            .font(.system(size: 24))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(audioViewModel.currentZoneIndex == 0)
+                    
+                    VStack(spacing: 2) {
+                        Text("Zone \(audioViewModel.activeZoneIndex) of \(audioViewModel.activeZoneCount)")
+                            .font(.caption)
+                            .fontWeight(.medium)
+                        
+                        if let zone = audioViewModel.currentZone {
+                            Text(zone.isIgnored ? "\(zone.name) (Ignored)" : zone.name)
+                                .font(.caption2)
+                                .foregroundColor(zone.isIgnored ? .red : .secondary)
+                        }
+                    }
+                    .frame(minWidth: 100)
+                    
+                    Button(action: {
+                        audioViewModel.nextZone()
+                    }) {
+                        Image(systemName: "chevron.right.circle")
+                            .font(.system(size: 24))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(audioViewModel.currentZoneIndex >= audioViewModel.zones.count - 1)
+                }
             }
             
             Spacer()
@@ -694,6 +750,19 @@ struct ContentView: View {
                             .buttonStyle(.bordered)
                             .disabled(!hasSelection)
                             
+                            // Suggest groups button - commented out for now
+                            /*
+                            Button(action: {
+                                audioViewModel.showAmplitudeGroupSuggestion = true
+                            }) {
+                                Label("Suggest Groups", systemImage: "sparkles")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(audioViewModel.markers.isEmpty)
+                            .help("Suggest group assignments based on amplitude")
+                            */
+                            
                             if hasSelection {
                                 Button(action: {
                                     audioViewModel.clearSelection()
@@ -775,9 +844,33 @@ struct ContentView: View {
                 allowedContentTypes: [.wav, .aiff, .mp3, .mpeg4Audio]
             ) { result in
                 if case .success(let url) = result {
-                    if url.startAccessingSecurityScopedResource() {
-                        defer { url.stopAccessingSecurityScopedResource() }
-                        audioViewModel.importWAV(from: url)
+                    print("=== FILE IMPORTER SUCCESS ===")
+                    print("Selected URL: \(url)")
+                    print("URL path: \(url.path)")
+                    print("File exists: \(FileManager.default.fileExists(atPath: url.path))")
+                    
+                    // Create a bookmark for later access
+                    do {
+                        print("Creating bookmark...")
+                        let bookmarkData = try url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+                        print("Bookmark created successfully, size: \(bookmarkData.count) bytes")
+                        audioViewModel.importWAVWithBookmark(from: url, bookmarkData: bookmarkData)
+                    } catch {
+                        print("Failed to create bookmark: \(error)")
+                        print("Bookmark error type: \(type(of: error))")
+                        print("Falling back to direct import...")
+                        
+                        // Fallback to direct import
+                        if url.startAccessingSecurityScopedResource() {
+                            print("Started security-scoped access for fallback")
+                            defer { 
+                                print("Stopping security-scoped access for fallback")
+                                url.stopAccessingSecurityScopedResource() 
+                            }
+                            audioViewModel.importWAV(from: url)
+                        } else {
+                            print("Failed to start security-scoped access for fallback")
+                        }
                     }
                 }
             }
@@ -794,6 +887,31 @@ struct ContentView: View {
                     let normalLengthSeconds = Double(info.outlierInfo.suggestedTrimLength) / 44100.0
                     Text("\(outlierCount) region\(outlierCount == 1 ? " is" : "s are") significantly longer than the others. The typical regions are \(String(format: "%.1f", normalLengthSeconds)) seconds or shorter. Would you like to automatically trim the longer regions to match?")
                 }
+            }
+            .sheet(isPresented: $audioViewModel.showZoneChoiceModal) {
+                ZoneChoiceView(onChoice: { wantsZones in
+                    if wantsZones {
+                        audioViewModel.showZoneSplitModal = true
+                    } else {
+                        // Process without zones
+                        if let url = audioViewModel.pendingImportURL {
+                            audioViewModel.processImport(from: url, with: [])
+                        }
+                    }
+                })
+            }
+            .sheet(isPresented: $audioViewModel.showZoneSplitModal) {
+                if let url = audioViewModel.pendingImportURL {
+                    ZoneSplittingView(
+                        audioURL: url,
+                        onComplete: { zoneMarkers, ignoredZones in
+                            audioViewModel.processImport(from: url, with: zoneMarkers, ignoredZones: ignoredZones)
+                        }
+                    )
+                }
+            }
+            .sheet(isPresented: $audioViewModel.showAmplitudeGroupSuggestion) {
+                AmplitudeGroupSuggestionView(audioViewModel: audioViewModel)
             }
         }
  
@@ -977,6 +1095,8 @@ struct ContentView: View {
                                 selectedGroups.removeAll()
                             }
                             .font(.caption2)
+                            
+                            Spacer()
                         }
                     }
                     
