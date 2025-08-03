@@ -1,0 +1,273 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 
+  Ableton Drum Rack Group (.adg) Template
+  This file provides the structure for creating a Drum Rack preset.
+  A Drum Rack is a type of Instrument Rack that is specialized for drums.
+  It contains 'Chains' (or 'Branches' in the XML), each holding a device on a specific drum pad.
+  Each pad corresponds to a MIDI note.
+  Values are placeholders and should be replaced with actual desired settings.
+  
+  IMPORTANT STRUCTURAL REQUIREMENTS:
+  1. When embedding a device (like MultiSampler) in a drum pad, you MUST include ALL device-level metadata tags
+     at the beginning of the device block (LomId, LomIdView, IsExpanded, On, UserName, etc.)
+  2. DO NOT duplicate any tags - Ableton's parser is very strict about this
+  3. The ZoneSettings for drum pads should ONLY contain: ReceivingNote, SendingNote, and ChokeGroup
+  4. DO NOT include BranchSelectorRange or complex KeyRange/SelectorAssignments - these are for Instrument Racks only
+-->
+<Ableton MajorVersion="5" MinorVersion="12.0_12203" SchemaChangeCount="3" Creator="Ableton Live 12.2.1" Revision="c0d59beb0465cc1bcc75830dbff2b10a48082a7d">
+	<!-- The top-level element for a device group preset like a Drum Rack. -->
+	<GroupDevicePreset>
+		<OverwriteProtectionNumber Value="0" /> <!-- Internal Ableton value. Keep as 0. -->
+
+		<!-- =============================================================================== -->
+		<!-- DRUM RACK DEVICE DEFINITION                                                     -->
+		<!-- This section contains the main parameters for the Drum Rack itself.             -->
+		<!-- =============================================================================== -->
+		<Device>
+			<DrumGroupDevice Id="0">
+				<LomId Value="0" /> <!-- Internal Live Object Model ID. Keep as 0. -->
+				<IsExpanded Value="true" /> <!-- Determines if the device chain view is expanded. -->
+				<On>
+					<Manual Value="true" /> <!-- Master On/Off switch for the entire Drum Rack. -->
+				</On>
+				<UserName Value="Your_Drum_Rack_Name" /> <!-- The name of the preset, visible in Live's browser. -->
+				<Annotation Value="Your_Notes_Here" /> <!-- Corresponds to the info text box for the device. -->
+				
+				<!-- Macro Controls Section -->
+				<!-- Drum Racks have 16 Macro Controls. This section defines their state. -->
+				<!-- For simplicity, only one is shown here. -->
+				<MacroControls.0>
+					<LomId Value="0" />
+					<Manual Value="0" /> <!-- The value of the Macro knob (0-127). -->
+				</MacroControls.0>
+				<!-- ... Other MacroControls.1 through MacroControls.15 would go here ... -->
+				<MacroDisplayNames.0 Value="Macro 1" /> <!-- The user-visible name of the Macro. -->
+				<!-- ... Other MacroDisplayNames would go here ... -->
+
+				<!-- Rack-level settings -->
+				<IsAutoSelectEnabled Value="true" /> <!-- Auto-selects a chain when its pad is played. -->
+				<ArePadsVisible Value="true" /> <!-- Determines if the drum pads grid is visible. -->
+				<PadScrollPosition Value="24" /> <!-- Which row of pads is visible. C1 is at position 24. -->
+				
+				<!-- This wrapper holds the list of chains (drum pads). It is populated by the <BranchPresets> below. -->
+				<ChainsListWrapper LomId="0" />
+				<DrumPadsListWrapper LomId="0" />
+			</DrumGroupDevice>
+		</Device>
+		
+		<!-- A reference to the default preset for this device type. -->
+		<PresetRef>
+			<AbletonDefaultPresetRef Id="0">
+				<DeviceId Name="DrumGroupDevice" />
+			</AbletonDefaultPresetRef>
+		</PresetRef>
+
+		<!-- =============================================================================== -->
+		<!-- DRUM PAD CHAINS (BRANCHES) SECTION                                              -->
+		<!-- This is where each individual drum pad and its contained instrument is defined. -->
+		<!-- Add a new <DrumBranchPreset> for each pad you want to create.                 -->
+		<!-- =============================================================================== -->
+		<BranchPresets>
+		
+			<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+			<!-- EXAMPLE: A SINGLE DRUM PAD ON NOTE C1 (MIDI Note 36)                        -->
+			<!-- This block defines one pad in the Drum Rack.                                -->
+			<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+			<DrumBranchPreset Id="0">
+				<!-- This section contains the instrument(s) loaded onto this specific pad. -->
+				<DevicePresets>
+					<!-- This is the wrapper for our Sampler instrument. -->
+					<AbletonDevicePreset Id="0">
+						<!--
+						  DEVICE DEFINITION FOR THE PAD
+						  This is where you embed the full XML for an instrument (.adv file).
+						  
+						  CRITICAL: You MUST include the COMPLETE device structure with ALL metadata tags.
+						  DO NOT just copy the Player/Pitch/Filter sections - you need the full device definition.
+						-->
+						<Device>
+							<MultiSampler Id="0">
+								<!-- 
+								=========================================================== 
+								=== REQUIRED DEVICE-LEVEL METADATA (MUST COME FIRST!)    === 
+								=========================================================== 
+								ALL of these tags are REQUIRED at the beginning of the MultiSampler block.
+								Missing any of these will cause Ableton to reject the file.
+								-->
+								<LomId Value="0" />
+								<LomIdView Value="0" />
+								<IsExpanded Value="true" />
+								<On>
+									<LomId Value="0" />
+									<Manual Value="true" />
+									<AutomationTarget Id="0">
+										<LockEnvelope Value="0" />
+									</AutomationTarget>
+									<MidiCCOnOffThresholds>
+										<Min Value="64" />
+										<Max Value="127" />
+									</MidiCCOnOffThresholds>
+								</On>
+								<ParametersListWrapper LomId="0" />
+								<LastSelectedTimeableIndex Value="0" />
+								<LastSelectedClipEnvelopeIndex Value="0" />
+								<LastPresetRef>
+									<Value />
+								</LastPresetRef>
+								<LockedScripts />
+								<IsFolded Value="false" />
+								<ShouldShowPresetName Value="true" />
+								<UserName Value="Sampler" />
+								<Annotation Value="" />
+								<SourceContext>
+									<Value />
+								</SourceContext>
+								<OverwriteProtectionNumber Value="2816" />
+								
+								<!-- 
+								=========================================================== 
+								=== THEN PASTE YOUR INSTRUMENT DATA (Player, etc.)       === 
+								=========================================================== 
+								After the metadata block above, paste the Player, Pitch, Filter,
+								VolumeAndPan, Globals, and other sections from your .adv file.
+								
+								IMPORTANT: Do NOT include duplicate <LomId> tags!
+								-->
+								<Player>
+									<MultiSampleMap>
+										<SampleParts>
+											<MultiSamplePart Id="0">
+												<LomId Value="0" />
+												<Name Value="C1_Sample" />
+												<KeyRange> 
+													<Min Value="0" />
+													<Max Value="127" /> 
+												</KeyRange>
+												<VelocityRange> 
+													<Min Value="0" />
+													<Max Value="127" /> 
+												</VelocityRange>
+												<SampleRef>
+													<FileRef>
+														<RelativePath Value="Samples/MyKick.wav" />
+													</FileRef>
+												</SampleRef>
+											</MultiSamplePart>
+										</SampleParts>
+									</MultiSampleMap>
+								</Player>
+								<!-- ... rest of your .adv structure (Pitch, Filter, etc.) ... -->
+							</MultiSampler>
+						</Device>
+
+						<!-- This references the embedded .adv file itself. You can point to an external .adv file. -->
+						<PresetRef>
+							<FilePresetRef Id="0">
+								<FileRef>
+									<RelativePathType Value="1" /> <!-- 1 = Relative to the .adg file's location -->
+									<RelativePath Value="My_Sampler_Preset.adv" />
+									<Path Value="/Absolute/Path/To/My_Sampler_Preset.adv" />
+								</FileRef>
+							</FilePresetRef>
+						</PresetRef>
+					</AbletonDevicePreset>
+				</DevicePresets>
+				
+				<!-- This section defines the mixer settings for this specific pad (Volume, Pan, Sends). -->
+				<MixerPreset>
+					<AbletonDevicePreset Id="0">
+						<Device>
+							<AudioBranchMixerDevice Id="0">
+								<Volume> <Manual Value="1" /> </Volume> <!-- Linear gain, 1 = 0dB -->
+								<Panorama> <Manual Value="0" /> </Panorama> <!-- -1 to 1 -->
+							</AudioBranchMixerDevice>
+						</Device>
+					</AbletonDevicePreset>
+				</MixerPreset>
+				
+				<!--
+				  PAD MAPPING AND SETTINGS
+				  This is the crucial part that assigns the chain to a specific drum pad.
+				  
+				  CRITICAL FOR DRUM RACKS: The ZoneSettings should ONLY contain these three tags.
+				  DO NOT include KeyRange, VelocityRanges, or SelectorAssignments - those are for Instrument Racks only!
+				-->
+				<ZoneSettings>
+					<!-- 
+					  ReceivingNote: The MIDI Note that will trigger this chain.
+					  This determines which pad the instrument appears on.
+					  Common values: 36=C1, 37=C#1, 38=D1, etc.
+					-->
+					<ReceivingNote Value="36" /> <!-- MIDI Note C1 -->
+					
+					<!-- 
+					  SendingNote: The MIDI note sent out by the chain. By default, it's the same
+					  as the receiving note, but can be changed for complex routing. 60 = C3.
+					-->
+					<SendingNote Value="60" /> 
+					
+					<!-- 
+					  ChokeGroup: Assigns the pad to a choke group (1-16). 0 means no group.
+					  Pads in the same choke group will cut each other off (e.g., for open/closed hi-hats).
+					-->
+					<ChokeGroup Value="0" />
+					
+					<!-- 
+					  DO NOT INCLUDE THESE IN DRUM RACK ZONE SETTINGS:
+					  - <KeyRange> (this is for Instrument Racks)
+					  - <VelocitiesLoop> (this is for Instrument Racks)
+					  - <VelocityRanges> (this is for Instrument Racks)
+					  - <SelectorAssignments> (this is for Instrument Racks)
+					  
+					  Also DO NOT include <BranchSelectorRange> before ZoneSettings - it's not needed for drum pads.
+					-->
+				</ZoneSettings>
+			</DrumBranchPreset>
+			
+			<!-- ... You can add more <DrumBranchPreset> blocks here for other pads ... -->
+			
+		</BranchPresets>
+		
+		<!-- Return chains for the rack would be defined here. -->
+		<ReturnBranchPresets />
+		
+	</GroupDevicePreset>
+	
+	<!-- 
+	===============================================================================
+	SUMMARY OF KEY REQUIREMENTS FOR VALID ADG FILES:
+	===============================================================================
+	
+	1. COMPLETE DEVICE METADATA IS MANDATORY
+	   When embedding any device (MultiSampler, Simpler, etc.) in a drum pad, you MUST 
+	   include ALL device-level metadata tags at the beginning of the device block.
+	   This includes: LomId, LomIdView, IsExpanded, On (with full sub-structure), 
+	   ParametersListWrapper, UserName, Annotation, etc.
+	   
+	2. NO DUPLICATE TAGS
+	   Ableton's XML parser is extremely strict. Having duplicate tags (like two 
+	   <LomId> tags in the same scope) will cause the file to be rejected.
+	   
+	3. DRUM RACK ZONE SETTINGS ARE SIMPLE
+	   For drum pads, ZoneSettings should ONLY contain:
+	   - ReceivingNote (which pad triggers this sound)
+	   - SendingNote (what MIDI note to send to the device)
+	   - ChokeGroup (for hi-hat style choking, 0 = no group)
+	   
+	4. AVOID INSTRUMENT RACK ELEMENTS
+	   Do NOT include these in drum rack presets:
+	   - BranchSelectorRange
+	   - Complex KeyRange/VelocityRanges in ZoneSettings
+	   - SelectorAssignments
+	   These are for Instrument Racks, not Drum Racks.
+	   
+	5. DEVICE EMBEDDING
+	   When pasting device XML from an .adv file:
+	   - Include the ENTIRE device structure
+	   - Start with all metadata tags
+	   - Then include Player, Pitch, Filter, etc.
+	   - Watch out for duplicate LomId tags when merging XML
+	
+	===============================================================================
+	-->
+</Ableton>
