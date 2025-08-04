@@ -25,6 +25,12 @@ struct ContentView: View {
     @State private var rootKey = 60
     @State private var selectedGroupForAssignment = 1
     
+    // Envelope parameters
+    @State private var envelopeAttack: Double = 1.0  // ms
+    @State private var envelopeDecay: Double = 1.0   // ms
+    @State private var envelopeSustain: Double = 0.0 // dB
+    @State private var envelopeRelease: Double = 50.0 // ms
+    
     // Computed properties
     var hasGroups: Bool {
         !audioViewModel.markerGroups.isEmpty
@@ -258,6 +264,16 @@ struct ContentView: View {
                             .frame(height: 20)
                         
                         Button(action: {
+                            audioViewModel.analyzeCurrentRegionAmplitude()
+                        }) {
+                            Label("Analyze Amplitude", systemImage: "waveform.path")
+                        }
+                        .buttonStyle(.bordered)
+                        
+                        Divider()
+                            .frame(height: 20)
+                        
+                        Button(action: {
                             audioViewModel.stopTransientInspection()
                         }) {
                             Label("Exit Inspection", systemImage: "xmark.circle.fill")
@@ -389,7 +405,7 @@ struct ContentView: View {
                                     audioViewModel.zoom(by: newZoom / audioViewModel.zoomLevel, at: 0.5, in: 1.0)
                                 }
                             ),
-                            in: 1...500
+                            in: 1...100
                         )
                         .frame(width: 120)
                         Text(String(format: "%.0fx", audioViewModel.zoomLevel))
@@ -657,6 +673,14 @@ struct ContentView: View {
                             }
                             
                             Button(action: {
+                                audioViewModel.detectRegionEndpoints()
+                            }) {
+                                Label("Detect Endpoints", systemImage: "arrow.right.to.line")
+                                    .font(.caption)
+                            }
+                            .disabled(audioViewModel.markers.isEmpty || audioViewModel.isDetectingTransients)
+                            
+                            Button(action: {
                                 audioViewModel.markers.removeAll()
                                 audioViewModel.transientMarkers.removeAll()
                                 audioViewModel.hasDetectedTransients = false
@@ -750,8 +774,7 @@ struct ContentView: View {
                             .buttonStyle(.bordered)
                             .disabled(!hasSelection)
                             
-                            // Suggest groups button - commented out for now
-                            /*
+                            // Suggest groups button
                             Button(action: {
                                 audioViewModel.showAmplitudeGroupSuggestion = true
                             }) {
@@ -760,8 +783,7 @@ struct ContentView: View {
                             }
                             .buttonStyle(.bordered)
                             .disabled(audioViewModel.markers.isEmpty)
-                            .help("Suggest group assignments based on amplitude")
-                            */
+                            .help("Suggest group assignments based on spectral analysis")
                             
                             if hasSelection {
                                 Button(action: {
@@ -949,9 +971,27 @@ struct ContentView: View {
                 .menuStyle(.borderlessButton)
                 
                 Button(action: {
+                    // Update envelope parameters before saving
+                    samplerViewModel.masterEnvelopeAttack = envelopeAttack
+                    samplerViewModel.masterEnvelopeDecay = envelopeDecay
+                    samplerViewModel.masterEnvelopeSustain = envelopeSustain
+                    samplerViewModel.masterEnvelopeRelease = envelopeRelease
                     samplerViewModel.saveToADVFile()
                 }) {
                     Label("Export ADV", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(samplerViewModel.multiSampleParts.isEmpty)
+                
+                Button(action: {
+                    // Update envelope parameters before saving
+                    samplerViewModel.masterEnvelopeAttack = envelopeAttack
+                    samplerViewModel.masterEnvelopeDecay = envelopeDecay
+                    samplerViewModel.masterEnvelopeSustain = envelopeSustain
+                    samplerViewModel.masterEnvelopeRelease = envelopeRelease
+                    samplerViewModel.saveToADGFile()
+                }) {
+                    Label("Export ADG", systemImage: "square.grid.2x2")
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(samplerViewModel.multiSampleParts.isEmpty)
@@ -1220,6 +1260,82 @@ struct ContentView: View {
                         }
                     }
                     
+                    // Envelope controls
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Envelope Settings:")
+                            .font(.caption)
+                            .bold()
+                        
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Attack")
+                                    .font(.caption2)
+                                TextField("", value: $envelopeAttack, format: .number)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 60)
+                                    .font(.caption)
+                                    .onChange(of: envelopeAttack) { newValue in
+                                        samplerViewModel.masterEnvelopeAttack = newValue
+                                    }
+                                Text("ms")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                            
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Decay")
+                                    .font(.caption2)
+                                TextField("", value: $envelopeDecay, format: .number)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 60)
+                                    .font(.caption)
+                                    .onChange(of: envelopeDecay) { newValue in
+                                        samplerViewModel.masterEnvelopeDecay = newValue
+                                    }
+                                Text("ms")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Sustain")
+                                    .font(.caption2)
+                                TextField("", value: $envelopeSustain, format: .number)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 60)
+                                    .font(.caption)
+                                    .onChange(of: envelopeSustain) { newValue in
+                                        samplerViewModel.masterEnvelopeSustain = newValue
+                                    }
+                                Text("dB")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                            
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Release")
+                                    .font(.caption2)
+                                TextField("", value: $envelopeRelease, format: .number)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 60)
+                                    .font(.caption)
+                                    .onChange(of: envelopeRelease) { newValue in
+                                        samplerViewModel.masterEnvelopeRelease = newValue
+                                    }
+                                Text("ms")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        
+                        Button("Calculate from Longest") {
+                            calculateReleaseFromLongestRegion()
+                        }
+                        .font(.caption2)
+                        .disabled(selectedGroups.isEmpty)
+                    }
                     
                     Spacer()
                     
@@ -1246,12 +1362,51 @@ struct ContentView: View {
         .opacity(hasGroups ? 1.0 : 0.5)
     }
     
+    private func calculateReleaseFromLongestRegion() {
+        let markerGroups = audioViewModel.markerGroups
+        let groupsToMap = markerGroups.filter { selectedGroups.contains($0.id) }
+        
+        var maxDuration: Double = 0
+        
+        for group in groupsToMap {
+            for marker in group.markers {
+                let startPos = marker.samplePosition
+                let endPos: Int
+                
+                if let customEnd = marker.customEndPosition {
+                    endPos = customEnd
+                } else {
+                    // Find next marker or use a default duration
+                    let sortedMarkers = audioViewModel.markers.sorted { $0.samplePosition < $1.samplePosition }
+                    if let index = sortedMarkers.firstIndex(where: { $0.id == marker.id }),
+                       index < sortedMarkers.count - 1 {
+                        endPos = sortedMarkers[index + 1].samplePosition
+                    } else {
+                        endPos = startPos + Int(audioViewModel.sampleRate * 0.5) // Default 500ms
+                    }
+                }
+                
+                let duration = Double(endPos - startPos) / audioViewModel.sampleRate * 1000 // Convert to ms
+                maxDuration = max(maxDuration, duration)
+            }
+        }
+        
+        // Set release to twice the longest region
+        envelopeRelease = maxDuration * 2
+    }
+    
     private func performMapping() {
         let markerGroups = audioViewModel.markerGroups
         let groupsToMap = markerGroups.filter { selectedGroups.contains($0.id) }
         
         // Set the mapping mode in the sampler view model
         samplerViewModel.currentMappingMode = mappingMode
+        
+        // Set envelope parameters
+        samplerViewModel.masterEnvelopeAttack = envelopeAttack
+        samplerViewModel.masterEnvelopeDecay = envelopeDecay
+        samplerViewModel.masterEnvelopeSustain = envelopeSustain
+        samplerViewModel.masterEnvelopeRelease = envelopeRelease
         
         if mappingMode == .multipleKeys {
             // Multiple Keys mode: Each group to its own key

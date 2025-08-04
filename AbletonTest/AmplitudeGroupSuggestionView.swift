@@ -5,55 +5,66 @@ struct AmplitudeGroupSuggestionView: View {
     @ObservedObject var audioViewModel: EnhancedAudioViewModel
     @Environment(\.dismiss) var dismiss
     
-    @State private var numberOfGroups: Int = 3
-    @State private var letSoftwareGuess = false
+    @State private var windowLengthMs: Double = 256
     @State private var suggestedGrouping: [Int: [Marker]] = [:]
     @State private var showingSuggestions = false
     @State private var isAnalyzing = false
-    @State private var previewingGroup: Int? = nil
-    @State private var playingAllInGroup: Int? = nil
-    @State private var currentPlayingMarkerIndex: Int = 0
-    @State private var groupPlaybackTimer: Timer? = nil
+    @State private var expandedGroups: Set<Int> = []
+    @State private var playingMarkers: Set<UUID> = []
+    
+    // Testing mode states
+    @State private var isTestingMode = false
+    @State private var manualGrouping: [Int: [Marker]] = [:]
+    @State private var testSession: GroupingTestSession? = nil
+    @State private var showingExportDialog = false
+    
+    private let analyzer = SpectralGroupingAnalyzer()
     
     var body: some View {
         VStack(spacing: 20) {
-            Text("Amplitude-Based Group Assignment")
+            Text("Spectral-Based Group Assignment")
                 .font(.title2)
                 .fontWeight(.semibold)
             
             if !showingSuggestions {
                 // Initial configuration
                 VStack(spacing: 20) {
-                    Text("How would you like to group regions by amplitude?")
+                    Text("Spectral Analysis Configuration")
                         .font(.headline)
                     
+                    Text("The system will automatically determine the optimal number of velocity layers and round-robins based on your samples.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                    
                     VStack(alignment: .leading, spacing: 16) {
-                        HStack {
-                            Button(action: {
-                                letSoftwareGuess = false
-                            }) {
-                                HStack {
-                                    Image(systemName: letSoftwareGuess ? "circle" : "checkmark.circle.fill")
-                                    Text("Specify number of groups:")
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            
-                            Stepper(value: $numberOfGroups, in: 2...10) {
-                                Text("\(numberOfGroups) groups")
-                            }
-                            .disabled(letSoftwareGuess)
+                        // Testing mode toggle
+                        Toggle("Testing Mode", isOn: $isTestingMode)
+                            .help("Enable to manually group samples before running auto-suggestion for comparison")
+                        
+                        if isTestingMode {
+                            Text("In testing mode, first assign groups manually using the main interface, then run analysis to compare.")
+                                .font(.caption)
+                                .foregroundColor(.orange)
+                                .padding(.vertical, 4)
                         }
                         
-                        Button(action: {
-                            letSoftwareGuess = true
-                        }) {
+                        Divider()
+                        
+                        // Window length
+                        VStack(alignment: .leading, spacing: 4) {
                             HStack {
-                                Image(systemName: letSoftwareGuess ? "checkmark.circle.fill" : "circle")
-                                Text("Let software determine optimal grouping")
+                                Text("Analysis Window:")
+                                Spacer()
+                                Text("\(Int(windowLengthMs)) ms")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
                             }
+                            Slider(value: $windowLengthMs, in: 100...500, step: 50) {
+                                Text("Window")
+                            }
+                            .help("Length of audio to analyze from each sample's attack")
                         }
-                        .buttonStyle(.plain)
                     }
                     .padding()
                     .background(Color.gray.opacity(0.1))
@@ -68,7 +79,11 @@ struct AmplitudeGroupSuggestionView: View {
                         Spacer()
                         
                         Button("Analyze") {
-                            analyzeAmplitudes()
+                            if isTestingMode {
+                                captureManualGroupingAndAnalyze()
+                            } else {
+                                analyzeWithSpectralFeatures()
+                            }
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(isAnalyzing)
@@ -86,13 +101,18 @@ struct AmplitudeGroupSuggestionView: View {
                                 GroupSuggestionRow(
                                     groupNumber: groupNum,
                                     markers: suggestedGrouping[groupNum] ?? [],
-                                    isPlaying: previewingGroup == groupNum,
-                                    isPlayingAll: playingAllInGroup == groupNum,
-                                    onPreview: {
-                                        toggleGroupPreview(groupNum)
+                                    isExpanded: expandedGroups.contains(groupNum),
+                                    playingMarkers: playingMarkers,
+                                    audioViewModel: audioViewModel,
+                                    onToggleExpand: {
+                                        if expandedGroups.contains(groupNum) {
+                                            expandedGroups.remove(groupNum)
+                                        } else {
+                                            expandedGroups.insert(groupNum)
+                                        }
                                     },
-                                    onAuditionAll: {
-                                        toggleGroupAudition(groupNum)
+                                    onPlayMarker: { marker in
+                                        playMarker(marker)
                                     }
                                 )
                             }
@@ -113,6 +133,13 @@ struct AmplitudeGroupSuggestionView: View {
                             dismiss()
                         }
                         .buttonStyle(.borderedProminent)
+                        
+                        if isTestingMode && testSession != nil {
+                            Button("Export Analysis") {
+                                showingExportDialog = true
+                            }
+                            .buttonStyle(.bordered)
+                        }
                     }
                 }
             }
@@ -131,14 +158,118 @@ struct AmplitudeGroupSuggestionView: View {
         }
         .onDisappear {
             // Clean up any ongoing playback
-            if playingAllInGroup != nil {
+            if !playingMarkers.isEmpty {
                 audioViewModel.stopPlayback()
-                groupPlaybackTimer?.invalidate()
-                playingAllInGroup = nil
+                playingMarkers.removeAll()
             }
-            if previewingGroup != nil {
-                audioViewModel.stopPlayback()
-                previewingGroup = nil
+        }
+        .fileExporter(
+            isPresented: $showingExportDialog,
+            document: TestSessionDocument(session: testSession),
+            contentType: .json,
+            defaultFilename: "spectral_grouping_analysis_\(Date().timeIntervalSince1970).json"
+        ) { result in
+            switch result {
+            case .success(let url):
+                print("Analysis exported to: \(url)")
+                if let session = testSession {
+                    analyzer.printDetailedAnalysis(session)
+                }
+            case .failure(let error):
+                print("Export failed: \(error)")
+            }
+        }
+    }
+    
+    private func analyzeWithSpectralFeatures() {
+        isAnalyzing = true
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                // Create temporary audio files for each region
+                var regionURLs: [(marker: Marker, url: URL)] = []
+                let tempDir = FileManager.default.temporaryDirectory
+                
+                guard let buffer = audioViewModel.sampleBuffer else { return }
+                let sortedMarkers = audioViewModel.markers.sorted { $0.samplePosition < $1.samplePosition }
+                
+                for (index, marker) in sortedMarkers.enumerated() {
+                    let startPos = marker.samplePosition
+                    let endPos: Int
+                    
+                    if let customEnd = marker.customEndPosition {
+                        endPos = customEnd
+                    } else if index < sortedMarkers.count - 1 {
+                        endPos = sortedMarkers[index + 1].samplePosition
+                    } else {
+                        endPos = audioViewModel.zoneStartOffset + audioViewModel.zoneTotalSamples
+                    }
+                    
+                    // Extract region samples
+                    let regionLength = endPos - startPos
+                    guard regionLength > 0 else { continue }
+                    
+                    let regionSamples = Array(buffer.samples[startPos..<min(endPos, buffer.samples.count)])
+                    
+                    // Create temporary audio file
+                    let tempURL = tempDir.appendingPathComponent("region_\(marker.id.uuidString).wav")
+                    
+                    // Write samples to WAV file
+                    if let audioFile = try? AVAudioFile(forWriting: tempURL, settings: [
+                        AVFormatIDKey: kAudioFormatLinearPCM,
+                        AVSampleRateKey: audioViewModel.sampleRate,
+                        AVNumberOfChannelsKey: 1,
+                        AVLinearPCMBitDepthKey: 32,
+                        AVLinearPCMIsFloatKey: true
+                    ]) {
+                        let audioBuffer = AVAudioPCMBuffer(pcmFormat: audioFile.processingFormat, frameCapacity: AVAudioFrameCount(regionSamples.count))!
+                        audioBuffer.frameLength = AVAudioFrameCount(regionSamples.count)
+                        
+                        if let channelData = audioBuffer.floatChannelData {
+                            for (i, sample) in regionSamples.enumerated() {
+                                channelData[0][i] = sample
+                            }
+                        }
+                        
+                        try audioFile.write(from: audioBuffer)
+                        regionURLs.append((marker: marker, url: tempURL))
+                    }
+                }
+                
+                // Use automatic spectral analysis to group samples
+                let urls = regionURLs.map { $0.url }
+                let groups = try autoGroupSamplesIntoPseudoVelocityLayers(
+                    urls: urls,
+                    windowMs: windowLengthMs
+                )
+                
+                // Convert results back to markers
+                var grouping: [Int: [Marker]] = [:]
+                for (groupIndex, groupURLs) in groups.enumerated() {
+                    grouping[groupIndex] = []
+                    for url in groupURLs {
+                        if let item = regionURLs.first(where: { $0.url == url }) {
+                            grouping[groupIndex]?.append(item.marker)
+                        }
+                    }
+                }
+                
+                // Clean up temporary files
+                for item in regionURLs {
+                    try? FileManager.default.removeItem(at: item.url)
+                }
+                
+                DispatchQueue.main.async {
+                    suggestedGrouping = grouping
+                    showingSuggestions = true
+                    isAnalyzing = false
+                }
+                
+            } catch {
+                print("Error analyzing with spectral features: \(error)")
+                DispatchQueue.main.async {
+                    isAnalyzing = false
+                }
             }
         }
     }
@@ -176,26 +307,8 @@ struct AmplitudeGroupSuggestionView: View {
             // Sort by amplitude
             regionAmplitudes.sort { $0.maxAmplitude > $1.maxAmplitude }
             
-            // Determine grouping
-            var grouping: [Int: [Marker]] = [:]
-            
-            if letSoftwareGuess {
-                // Use k-means clustering or similar to determine optimal groups
-                let optimalGroups = determineOptimalGroups(from: regionAmplitudes)
-                grouping = optimalGroups
-            } else {
-                // Distribute into specified number of groups
-                let markersPerGroup = regionAmplitudes.count / numberOfGroups
-                let remainder = regionAmplitudes.count % numberOfGroups
-                
-                var currentIndex = 0
-                for group in 1...numberOfGroups {
-                    let groupSize = markersPerGroup + (group <= remainder ? 1 : 0)
-                    let groupMarkers = regionAmplitudes[currentIndex..<(currentIndex + groupSize)].map { $0.marker }
-                    grouping[group] = groupMarkers
-                    currentIndex += groupSize
-                }
-            }
+            // Use the automatic grouping logic
+            let grouping = determineOptimalGroups(from: regionAmplitudes)
             
             DispatchQueue.main.async {
                 suggestedGrouping = grouping
@@ -242,102 +355,109 @@ struct AmplitudeGroupSuggestionView: View {
         return renumbered
     }
     
-    private func toggleGroupPreview(_ groupNum: Int) {
-        if previewingGroup == groupNum {
+    private func playMarker(_ marker: Marker) {
+        if playingMarkers.contains(marker.id) {
             audioViewModel.stopPlayback()
-            previewingGroup = nil
+            playingMarkers.remove(marker.id)
         } else {
-            previewingGroup = groupNum
-            playGroupRegions(groupNum)
-        }
-    }
-    
-    private func playGroupRegions(_ groupNum: Int) {
-        guard let markers = suggestedGrouping[groupNum], !markers.isEmpty else { return }
-        
-        // Play the first region in the group as a sample
-        let firstMarker = markers[0]
-        let sortedMarkers = audioViewModel.markers.sorted { $0.samplePosition < $1.samplePosition }
-        
-        if let index = sortedMarkers.firstIndex(where: { $0.id == firstMarker.id }) {
-            // Create a temporary selection for the region
-            let startPos = firstMarker.samplePosition
-            let endPos: Int
-            
-            if let customEnd = firstMarker.customEndPosition {
-                endPos = customEnd
-            } else if index < sortedMarkers.count - 1 {
-                endPos = sortedMarkers[index + 1].samplePosition
-            } else {
-                endPos = audioViewModel.zoneStartOffset + audioViewModel.zoneTotalSamples
-            }
-            
-            audioViewModel.tempSelection = startPos...endPos
-            audioViewModel.playSelection()
-            
-            // Clear selection after a delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                audioViewModel.tempSelection = nil
-            }
-        }
-    }
-    
-    private func toggleGroupAudition(_ groupNum: Int) {
-        // Stop any current playback
-        if playingAllInGroup != nil {
+            // Stop any other playback
             audioViewModel.stopPlayback()
-            groupPlaybackTimer?.invalidate()
-            playingAllInGroup = nil
-            currentPlayingMarkerIndex = 0
-        } else if previewingGroup != nil {
-            audioViewModel.stopPlayback()
-            previewingGroup = nil
-        }
-        
-        // Start group audition if this is a new group
-        if playingAllInGroup != groupNum {
-            playingAllInGroup = groupNum
-            currentPlayingMarkerIndex = 0
-            playNextMarkerInGroup()
+            playingMarkers.removeAll()
+            
+            // Play this marker
+            let sortedMarkers = audioViewModel.markers.sorted { $0.samplePosition < $1.samplePosition }
+            
+            if let index = sortedMarkers.firstIndex(where: { $0.id == marker.id }) {
+                let startPos = marker.samplePosition
+                let endPos: Int
+                
+                if let customEnd = marker.customEndPosition {
+                    endPos = customEnd
+                } else if index < sortedMarkers.count - 1 {
+                    endPos = sortedMarkers[index + 1].samplePosition
+                } else {
+                    endPos = audioViewModel.zoneStartOffset + audioViewModel.zoneTotalSamples
+                }
+                
+                audioViewModel.tempSelection = startPos...endPos
+                audioViewModel.playSelection()
+                playingMarkers.insert(marker.id)
+                
+                // Clear playing state after playback
+                let duration = Double(endPos - startPos) / audioViewModel.sampleRate
+                DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
+                    playingMarkers.remove(marker.id)
+                    audioViewModel.tempSelection = nil
+                }
+            }
         }
     }
     
-    private func playNextMarkerInGroup() {
-        guard let groupNum = playingAllInGroup,
-              let markers = suggestedGrouping[groupNum],
-              currentPlayingMarkerIndex < markers.count else {
-            // Finished playing all markers in group
-            playingAllInGroup = nil
-            currentPlayingMarkerIndex = 0
-            return
+    private func captureManualGroupingAndAnalyze() {
+        isAnalyzing = true
+        
+        // Capture current manual grouping
+        manualGrouping = [:]
+        for marker in audioViewModel.markers {
+            if let group = marker.group {
+                if manualGrouping[group] == nil {
+                    manualGrouping[group] = []
+                }
+                manualGrouping[group]?.append(marker)
+            }
         }
         
-        let marker = markers[currentPlayingMarkerIndex]
-        let sortedMarkers = audioViewModel.markers.sorted { $0.samplePosition < $1.samplePosition }
-        
-        if let index = sortedMarkers.firstIndex(where: { $0.id == marker.id }) {
-            let startPos = marker.samplePosition
-            let endPos: Int
+        // Run analysis with comparison
+        Task {
+            // Run automatic grouping (which includes analysis)
+            let (autoGrouping, analysisData) = await analyzer.runAutomaticGrouping(
+                markers: audioViewModel.markers,
+                audioViewModel: audioViewModel,
+                windowMs: windowLengthMs
+            )
             
-            if let customEnd = marker.customEndPosition {
-                endPos = customEnd
-            } else if index < sortedMarkers.count - 1 {
-                endPos = sortedMarkers[index + 1].samplePosition
-            } else {
-                endPos = audioViewModel.zoneStartOffset + audioViewModel.zoneTotalSamples
+            // Convert groupings to string IDs
+            var manualStringGrouping: [Int: [String]] = [:]
+            for (group, markers) in manualGrouping {
+                manualStringGrouping[group] = markers.map { $0.id.uuidString }
             }
             
-            // Play this region
-            audioViewModel.tempSelection = startPos...endPos
-            audioViewModel.playSelection()
+            // Compare groupings
+            let metrics = analyzer.compareGroupings(
+                manual: manualStringGrouping,
+                automatic: autoGrouping,
+                analysisData: analysisData
+            )
             
-            // Calculate duration for this region
-            let duration = Double(endPos - startPos) / audioViewModel.sampleRate
+            // Create test session
+            let session = GroupingTestSession(
+                windowLengthMs: windowLengthMs,
+                sampleCount: audioViewModel.markers.count,
+                samples: analysisData,
+                manualGrouping: manualStringGrouping,
+                automaticGrouping: autoGrouping,
+                comparisonMetrics: metrics
+            )
             
-            // Schedule next marker playback
-            groupPlaybackTimer = Timer.scheduledTimer(withTimeInterval: duration + 0.2, repeats: false) { _ in
-                self.currentPlayingMarkerIndex += 1
-                self.playNextMarkerInGroup()
+            // Convert automatic grouping back to markers
+            var markerGrouping: [Int: [Marker]] = [:]
+            for (group, sampleIds) in autoGrouping {
+                markerGrouping[group] = []
+                for id in sampleIds {
+                    if let marker = audioViewModel.markers.first(where: { $0.id.uuidString == id }) {
+                        markerGrouping[group]?.append(marker)
+                    }
+                }
+            }
+            
+            await MainActor.run {
+                self.testSession = session
+                self.suggestedGrouping = markerGrouping
+                self.showingSuggestions = true
+                self.isAnalyzing = false
+                
+                // Print analysis to console
+                analyzer.printDetailedAnalysis(session)
             }
         }
     }
@@ -347,7 +467,7 @@ struct AmplitudeGroupSuggestionView: View {
         for (groupNum, markers) in suggestedGrouping {
             for marker in markers {
                 if let index = audioViewModel.markers.firstIndex(where: { $0.id == marker.id }) {
-                    audioViewModel.markers[index].group = groupNum
+                    audioViewModel.markers[index].group = groupNum + 1  // Groups start at 1 in the UI
                 }
             }
         }
@@ -357,47 +477,88 @@ struct AmplitudeGroupSuggestionView: View {
 struct GroupSuggestionRow: View {
     let groupNumber: Int
     let markers: [Marker]
-    let isPlaying: Bool
-    let isPlayingAll: Bool
-    let onPreview: () -> Void
-    let onAuditionAll: () -> Void
+    let isExpanded: Bool
+    let playingMarkers: Set<UUID>
+    @ObservedObject var audioViewModel: EnhancedAudioViewModel
+    let onToggleExpand: () -> Void
+    let onPlayMarker: (Marker) -> Void
     
     var body: some View {
-        HStack {
-            Circle()
-                .fill(Color.green)
-                .frame(width: 20, height: 20)
-                .overlay(
-                    Text("\(groupNumber)")
+        VStack(alignment: .leading, spacing: 8) {
+            // Group header
+            HStack {
+                Button(action: onToggleExpand) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                
+                Circle()
+                    .fill(Color.green)
+                    .frame(width: 20, height: 20)
+                    .overlay(
+                        Text("\(groupNumber + 1)")
+                            .font(.caption)
+                            .fontWeight(.bold)
+                            .foregroundColor(.white)
+                    )
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Velocity Layer \(groupNumber + 1)")
+                        .font(.headline)
+                    Text("\(markers.count) sample\(markers.count == 1 ? "" : "s") (round-robins)")
                         .font(.caption)
-                        .fontWeight(.bold)
-                        .foregroundColor(.white)
-                )
-            
-            VStack(alignment: .leading) {
-                Text("Group \(groupNumber)")
-                    .font(.headline)
-                Text("\(markers.count) regions")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
             
-            Spacer()
-            
-            Button(action: onAuditionAll) {
-                Image(systemName: isPlayingAll ? "stop.fill" : "speaker.wave.3.fill")
+            // Expanded sample list
+            if isExpanded {
+                VStack(spacing: 4) {
+                    ForEach(Array(markers.enumerated()), id: \.element.id) { index, marker in
+                        HStack {
+                            Text("\(index + 1).")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .frame(width: 20)
+                            
+                            Text(markerName(for: marker))
+                                .font(.caption)
+                                .lineLimit(1)
+                            
+                            Spacer()
+                            
+                            Button(action: { onPlayMarker(marker) }) {
+                                Image(systemName: playingMarkers.contains(marker.id) ? "stop.circle.fill" : "play.circle")
+                                    .foregroundColor(playingMarkers.contains(marker.id) ? .accentColor : .secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 4)
+                        .background(Color.gray.opacity(0.02))
+                        .cornerRadius(4)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 8)
             }
-            .buttonStyle(.plain)
-            .help("Audition all regions in this group")
-            
-            Button(action: onPreview) {
-                Image(systemName: isPlaying ? "stop.fill" : "play.fill")
-            }
-            .buttonStyle(.plain)
-            .help("Play first region as sample")
         }
-        .padding()
         .background(Color.gray.opacity(0.05))
         .cornerRadius(8)
+    }
+    
+    private func markerName(for marker: Marker) -> String {
+        // Find marker index in sorted list
+        let sortedMarkers = audioViewModel.markers.sorted { $0.samplePosition < $1.samplePosition }
+        if let index = sortedMarkers.firstIndex(where: { $0.id == marker.id }) {
+            return "Region \(index + 1)"
+        }
+        
+        return "Unknown"
     }
 }

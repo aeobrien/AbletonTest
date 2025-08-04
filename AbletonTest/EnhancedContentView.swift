@@ -78,15 +78,67 @@ final class EnhancedAudioViewModel: ObservableObject {
     @Published var showOutlierAlert = false
     var pendingOutlierInfo: (groupNumber: Int, markersToAssign: [(index: Int, marker: Marker)], outlierInfo: OutlierInfo)?
     
+    // Zone management
+    @Published var zones: [AudioZone] = []
+    @Published var currentZoneIndex: Int = 0
+    @Published var showZoneChoiceModal = false
+    @Published var showZoneSplitModal = false
+    @Published var showAmplitudeGroupSuggestion = false
+    var pendingImportURL: URL?
+    var pendingImportBookmark: Data?
+    
+    // Zone-specific data storage
+    struct ZoneData {
+        var markers: [Marker] = []
+        var transientMarkers: Set<Int> = []
+        var tempSelection: ClosedRange<Int>? = nil
+        var pendingGroupAssignment: ClosedRange<Int>? = nil
+        var hasDetectedTransients: Bool = false
+    }
+    var zoneDataStorage: [UUID: ZoneData] = [:]
+    
+    // Current zone computed property
+    var currentZone: AudioZone? {
+        guard !zones.isEmpty && currentZoneIndex < zones.count else { return nil }
+        return zones[currentZoneIndex]
+    }
+    
+    // Zone-aware sample range
+    var zoneTotalSamples: Int {
+        if let zone = currentZone {
+            return zone.duration
+        }
+        return totalSamples
+    }
+    
+    var zoneStartOffset: Int {
+        currentZone?.startSample ?? 0
+    }
+    
+    // Count of non-ignored zones
+    var activeZoneCount: Int {
+        zones.filter { !$0.isIgnored }.count
+    }
+    
+    // Current zone index among active zones
+    var activeZoneIndex: Int {
+        let activeZones = zones.enumerated().filter { !$0.element.isIgnored }
+        if let index = activeZones.firstIndex(where: { $0.offset == currentZoneIndex }) {
+            return index + 1
+        }
+        return 1
+    }
+    
     // Computed properties for visible range
     var visibleStart: Int {
-        let start = Int(scrollOffset * Double(totalSamples))
-        return min(max(0, start), totalSamples - 1)
+        let baseStart = Int(scrollOffset * Double(zoneTotalSamples))
+        let start = baseStart + zoneStartOffset
+        return min(max(zoneStartOffset, start), zoneStartOffset + zoneTotalSamples - 1)
     }
     
     var visibleLength: Int {
-        let length = Int(Double(totalSamples) / zoomLevel)
-        return min(length, totalSamples - visibleStart)
+        let length = Int(Double(zoneTotalSamples) / zoomLevel)
+        return min(length, zoneStartOffset + zoneTotalSamples - visibleStart)
     }
     
     // Group the markers by their group ID
@@ -107,10 +159,111 @@ final class EnhancedAudioViewModel: ObservableObject {
         print("=== IMPORT WAV START ===")
         print("Attempting to import: \(url.absoluteString)")
         
+        // Store the URL and show zone choice modal
+        pendingImportURL = url
+        pendingImportBookmark = nil
+        showZoneChoiceModal = true
+    }
+    
+    func importWAVWithBookmark(from url: URL, bookmarkData: Data) {
+        print("=== IMPORT WAV WITH BOOKMARK START ===")
+        print("Attempting to import: \(url.absoluteString)")
+        
+        // Store the URL and bookmark, then show zone choice modal
+        pendingImportURL = url
+        pendingImportBookmark = bookmarkData
+        showZoneChoiceModal = true
+    }
+    
+    // Process the import after zone decision
+    func processImport(from url: URL, with zoneMarkers: [ZoneMarker], ignoredZones: Set<Int> = Set()) {
+        print("=== PROCESS IMPORT DEBUG START ===")
+        print("Original URL: \(url)")
+        print("URL path: \(url.path)")
+        print("URL is file URL: \(url.isFileURL)")
+        print("Has pending bookmark: \(pendingImportBookmark != nil)")
+        
+        // Check if file exists
+        let fileManager = FileManager.default
+        print("File exists at original URL: \(fileManager.fileExists(atPath: url.path))")
+        
+        var urlToUse = url
+        var needsToStopAccess = false
+        
+        // If we have a bookmark, resolve it first
+        if let bookmarkData = pendingImportBookmark {
+            print("Attempting to resolve bookmark...")
+            do {
+                var isStale = false
+                urlToUse = try URL(resolvingBookmarkData: bookmarkData, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &isStale)
+                print("Bookmark resolved successfully")
+                print("Resolved URL: \(urlToUse)")
+                print("Bookmark is stale: \(isStale)")
+                
+                print("Attempting to start accessing security-scoped resource...")
+                if urlToUse.startAccessingSecurityScopedResource() {
+                    needsToStopAccess = true
+                    print("Successfully started accessing security-scoped resource")
+                } else {
+                    print("Failed to start accessing security-scoped resource")
+                }
+            } catch {
+                print("Failed to resolve bookmark: \(error)")
+                print("Error type: \(type(of: error))")
+                print("Error localized: \(error.localizedDescription)")
+                // Fall back to original URL
+                urlToUse = url
+            }
+        } else {
+            print("No bookmark data, using original URL")
+        }
+        
+        print("URL to use: \(urlToUse)")
+        print("URL to use path: \(urlToUse.path)")
+        print("File exists at URL to use: \(fileManager.fileExists(atPath: urlToUse.path))")
+        
+        // Check file attributes
+        do {
+            let attributes = try fileManager.attributesOfItem(atPath: urlToUse.path)
+            print("File attributes:")
+            print("  Size: \(attributes[.size] ?? "unknown")")
+            print("  Type: \(attributes[.type] ?? "unknown")")
+            print("  Creation date: \(attributes[.creationDate] ?? "unknown")")
+            print("  Modification date: \(attributes[.modificationDate] ?? "unknown")")
+        } catch {
+            print("Failed to get file attributes: \(error)")
+        }
+        
+        // Check if we can read the file
+        print("File is readable: \(fileManager.isReadableFile(atPath: urlToUse.path))")
+        
+        // Try to read a few bytes to test access
+        do {
+            let fileHandle = try FileHandle(forReadingFrom: urlToUse)
+            let data = fileHandle.readData(ofLength: 100)
+            print("Successfully read \(data.count) bytes from file")
+            fileHandle.closeFile()
+        } catch {
+            print("Failed to read file with FileHandle: \(error)")
+        }
+        
+        defer {
+            print("=== DEFER BLOCK ===")
+            if needsToStopAccess {
+                print("Stopping security-scoped resource access")
+                urlToUse.stopAccessingSecurityScopedResource()
+            }
+            // Clear pending data
+            pendingImportURL = nil
+            pendingImportBookmark = nil
+            print("=== DEFER BLOCK END ===")
+        }
         
         do {
             print("Creating AVAudioFile...")
-            let file = try AVAudioFile(forReading: url)
+            print("About to call AVAudioFile(forReading:) with URL: \(urlToUse)")
+            let file = try AVAudioFile(forReading: urlToUse)
+            print("AVAudioFile created successfully!")
             totalSamples = Int(file.length)
             print("File length: \(file.length) samples")
             print("Sample rate: \(file.fileFormat.sampleRate)")
@@ -130,25 +283,57 @@ final class EnhancedAudioViewModel: ObservableObject {
                 // Reset state
                 markers.removeAll()
                 tempSelection = nil
-                audioURL = url
+                audioURL = urlToUse
+                
+                // Set up zones if provided
+                if !zoneMarkers.isEmpty {
+                    zones = []
+                    let sortedMarkers = zoneMarkers.sorted { $0.position < $1.position }
+                    
+                    var startSample = 0
+                    var zoneIndex = 0
+                    for (index, marker) in sortedMarkers.enumerated() {
+                        let endSample = Int(marker.position * Double(totalSamples))
+                        if endSample > startSample {
+                            let zone = AudioZone(
+                                startSample: startSample,
+                                endSample: endSample,
+                                name: "Zone \(zoneIndex + 1)",
+                                isIgnored: ignoredZones.contains(zoneIndex)
+                            )
+                            zones.append(zone)
+                            zoneIndex += 1
+                        }
+                        startSample = endSample
+                    }
+                    
+                    // Add final zone
+                    if startSample < totalSamples {
+                        let zone = AudioZone(
+                            startSample: startSample,
+                            endSample: totalSamples,
+                            name: "Zone \(zoneIndex + 1)",
+                            isIgnored: ignoredZones.contains(zoneIndex)
+                        )
+                        zones.append(zone)
+                    }
+                    
+                    currentZoneIndex = 0
+                } else {
+                    // No zones - treat whole file as one zone
+                    zones = []
+                    currentZoneIndex = 0
+                }
                 
                 // Reset view controls
                 zoomLevel = 1.0
                 scrollOffset = 0.0
                 
                 // Setup audio player
-                setupAudioPlayer(url: url)
+                setupAudioPlayer(url: urlToUse)
                 
-                // Auto-scale Y axis based on peak amplitude
-                let maxAmplitude = samples.map { abs($0) }.max() ?? 1.0
-                print("Max amplitude: \(maxAmplitude)")
-                if maxAmplitude > 0 {
-                    // Scale so that the loudest part uses ~90% of the height
-                    yScale = Double(0.9 / maxAmplitude)
-                } else {
-                    yScale = 1.0
-                }
-                print("Y scale set to: \(yScale)")
+                // Auto-scale Y axis based on current zone's peak amplitude
+                updateYScaleForCurrentZone()
                 print("=== IMPORT WAV SUCCESS ===")
             } else {
                 print("ERROR: Failed to get float channel data")
@@ -157,6 +342,29 @@ final class EnhancedAudioViewModel: ObservableObject {
         } catch {
             print("ERROR: Audio import failed: \(error.localizedDescription)")
             print("Error details: \(error)")
+            print("Error type: \(type(of: error))")
+            
+            // Check if it's an AVAudioFile error
+            if let nsError = error as NSError? {
+                print("NSError domain: \(nsError.domain)")
+                print("NSError code: \(nsError.code)")
+                print("NSError userInfo: \(nsError.userInfo)")
+                
+                // Common audio file error codes
+                switch nsError.code {
+                case -54:
+                    print("Error -54: Permission denied (permErr)")
+                case -43:
+                    print("Error -43: File not found (fnfErr)")
+                case -50:
+                    print("Error -50: Parameter error (paramErr)")
+                case -35:
+                    print("Error -35: No such volume (nsvErr)")
+                default:
+                    print("Unknown error code")
+                }
+            }
+            
             print("=== IMPORT WAV FAILED ===")
         }
     }
@@ -396,17 +604,20 @@ final class EnhancedAudioViewModel: ObservableObject {
         // Zoom to show 100ms (50ms each side) around the marker
         let sampleRate = self.sampleRate
         let samplesFor50ms = Int(50.0 * sampleRate / 1000.0)
-        let startSample = max(0, marker.samplePosition - samplesFor50ms)
-        let endSample = min(totalSamples, marker.samplePosition + samplesFor50ms)
+        
+        // Convert marker position to zone-relative position
+        let zoneRelativePosition = marker.samplePosition - zoneStartOffset
+        let startSample = max(0, zoneRelativePosition - samplesFor50ms)
+        let endSample = min(zoneTotalSamples, zoneRelativePosition + samplesFor50ms)
         let regionSize = endSample - startSample
         
         // Calculate zoom to show this region
-        let targetZoom = Double(totalSamples) / Double(regionSize)
+        let targetZoom = Double(zoneTotalSamples) / Double(regionSize)
         zoomLevel = min(targetZoom, 500.0) // Cap at max zoom
         print("Zoom changed from \(preInspectDragZoom) to \(zoomLevel)")
         
-        // Center on the marker
-        let markerPosition = Double(marker.samplePosition) / Double(totalSamples)
+        // Center on the marker (zone-relative)
+        let markerPosition = Double(zoneRelativePosition) / Double(zoneTotalSamples)
         scrollOffset = max(0, min(1.0 - 1.0/zoomLevel, markerPosition - 0.5/zoomLevel))
         
         // Start audition if enabled
@@ -567,18 +778,22 @@ final class EnhancedAudioViewModel: ObservableObject {
     
     func zoomToSelection() {
         guard let selection = tempSelection ?? pendingGroupAssignment,
-              totalSamples > 0 else { return }
+              zoneTotalSamples > 0 else { return }
+        
+        // Convert selection to zone-relative positions
+        let zoneRelativeStart = selection.lowerBound - zoneStartOffset
+        let zoneRelativeEnd = selection.upperBound - zoneStartOffset
         
         // Calculate the zoom level needed to fill the view with the selection
-        let selectionLength = selection.upperBound - selection.lowerBound
-        let desiredZoomLevel = Double(totalSamples) / Double(selectionLength)
+        let selectionLength = zoneRelativeEnd - zoneRelativeStart
+        let desiredZoomLevel = Double(zoneTotalSamples) / Double(selectionLength)
         
         // Apply reasonable limits
-        zoomLevel = max(1.0, min(500.0, desiredZoomLevel * 0.9)) // 0.9 to add some padding
+        zoomLevel = max(1.0, min(100.0, desiredZoomLevel * 0.9)) // 0.9 to add some padding
         
-        // Center the view on the selection
-        let selectionCenter = Double(selection.lowerBound + selection.upperBound) / 2.0
-        let centerOffset = selectionCenter / Double(totalSamples)
+        // Center the view on the selection (zone-relative)
+        let selectionCenter = Double(zoneRelativeStart + zoneRelativeEnd) / 2.0
+        let centerOffset = selectionCenter / Double(zoneTotalSamples)
         
         // Calculate offset to center the selection
         scrollOffset = max(0, min(1.0 - 1.0/zoomLevel, centerOffset - 0.5/zoomLevel))
@@ -752,26 +967,26 @@ final class EnhancedAudioViewModel: ObservableObject {
     func zoom(by factor: Double, at location: CGFloat, in width: CGFloat) {
         // Compute the target zoom without mutating state first
         let oldZoom = zoomLevel
-        let newZoom = max(1.0, min(500.0, oldZoom * factor))
+        let newZoom = max(1.0, min(100.0, oldZoom * factor))
         
         guard newZoom != oldZoom,
-              totalSamples > 0,
+              zoneTotalSamples > 0,
               width > 0 else { return }
         
         // Normalised pointer location in [0, 1]
         let normalizedLocation = max(0, min(1, location / width))
         
         // Use the OLD visible length to find which sample is under the anchor
-        let oldVisibleLength = Double(totalSamples) / oldZoom
+        let oldVisibleLength = Double(zoneTotalSamples) / oldZoom
         let sampleAtLocation = Double(visibleStart) + normalizedLocation * oldVisibleLength
         
         // Now switch to the new zoom and compute the new start so the anchor stays put
-        let newVisibleLength = Double(totalSamples) / newZoom
+        let newVisibleLength = Double(zoneTotalSamples) / newZoom
         let newStart = sampleAtLocation - normalizedLocation * newVisibleLength
         
         // Commit state
         zoomLevel = newZoom
-        scrollOffset = max(0, min(1 - 1/newZoom, newStart / Double(totalSamples)))
+        scrollOffset = max(0, min(1 - 1/newZoom, newStart / Double(zoneTotalSamples)))
     }
 
     
@@ -824,10 +1039,11 @@ final class EnhancedAudioViewModel: ObservableObject {
             print("Detecting transients in selected region: \(startSample) to \(endSample)")
             print("Selection range size: \(endSample - startSample) samples")
         } else {
-            // Use entire file
-            startSample = 0
-            endSample = samples.count
-            print("Detecting transients in entire file")
+            // Use current zone
+            startSample = zoneStartOffset
+            endSample = min(zoneStartOffset + zoneTotalSamples, samples.count)
+            print("Detecting transients in current zone: \(startSample) to \(endSample)")
+            print("Zone size: \(endSample - startSample) samples")
         }
         
         // Debug current state
@@ -1600,6 +1816,142 @@ final class EnhancedAudioViewModel: ObservableObject {
         print("Deleted \(markersToDelete.count) transient markers in selected range")
     }
     
+    func detectRegionEndpoints() {
+        guard let buffer = sampleBuffer else { return }
+        
+        // Sort markers by position
+        let sortedMarkers = markers.sorted { $0.samplePosition < $1.samplePosition }
+        var endpointsDetected = 0
+        
+        for (index, marker) in sortedMarkers.enumerated() {
+            let startPos = marker.samplePosition
+            let nextMarkerPos: Int
+            
+            if index < sortedMarkers.count - 1 {
+                nextMarkerPos = sortedMarkers[index + 1].samplePosition
+            } else {
+                nextMarkerPos = min(startPos + Int(sampleRate * 2.0), buffer.count) // Max 2 seconds
+            }
+            
+            print("Analyzing region \(index): \(startPos) to \(nextMarkerPos)")
+            
+            // First, analyze the noise floor by looking at the last portion of the region
+            let noiseFloorStart = max(startPos + Int(sampleRate * 0.5), nextMarkerPos - Int(sampleRate * 0.2))
+            var noiseFloorSum: Float = 0
+            var noiseFloorCount = 0
+            var noiseFloorMax: Float = 0
+            
+            for i in noiseFloorStart..<nextMarkerPos {
+                if i >= buffer.count { break }
+                let amplitude = abs(buffer.samples[i])
+                noiseFloorSum += amplitude
+                noiseFloorMax = max(noiseFloorMax, amplitude)
+                noiseFloorCount += 1
+            }
+            
+            let avgNoiseFloor = noiseFloorCount > 0 ? noiseFloorSum / Float(noiseFloorCount) : 0.0001
+            print("Noise floor: avg=\(avgNoiseFloor), max=\(noiseFloorMax)")
+            
+            // Track peak amplitude in the first 200ms
+            var peakAmplitude: Float = 0
+            for sampleIdx in startPos..<min(startPos + Int(sampleRate * 0.2), nextMarkerPos) {
+                if sampleIdx >= buffer.count { break }
+                peakAmplitude = max(peakAmplitude, abs(buffer.samples[sampleIdx]))
+            }
+            
+            // Now find where the signal settles to near the noise floor
+            // Use a threshold that's slightly above the noise floor
+            let noiseThreshold = max(avgNoiseFloor * 2, noiseFloorMax * 1.5, 0.002) // At least -54dB
+            let significantThreshold = max(peakAmplitude * 0.05, noiseThreshold * 3) // 5% of peak or 3x noise floor
+            
+            // Scan backwards from the end to find the last significant audio
+            var lastSignificantSample = nextMarkerPos - 1
+            let scanStart = max(startPos + Int(sampleRate * 0.05), nextMarkerPos - Int(sampleRate * 1.5)) // Start scanning from up to 1.5s before end
+            
+            for i in stride(from: nextMarkerPos - 1, through: scanStart, by: -1) {
+                if i >= buffer.count { continue }
+                let amplitude = abs(buffer.samples[i])
+                
+                if amplitude > significantThreshold {
+                    lastSignificantSample = i
+                    break
+                }
+            }
+            
+            // Also scan forward to find where it first drops to near noise floor
+            var firstNoiseFloorSample: Int? = nil
+            let windowSize = Int(sampleRate * 0.02) // 20ms window
+            
+            for i in stride(from: startPos + windowSize, to: min(lastSignificantSample, nextMarkerPos), by: windowSize / 2) {
+                // Check if this window is at noise floor level
+                var windowMax: Float = 0
+                var windowSum: Float = 0
+                var windowCount = 0
+                
+                for j in i..<min(i + windowSize, buffer.count) {
+                    let amplitude = abs(buffer.samples[j])
+                    windowMax = max(windowMax, amplitude)
+                    windowSum += amplitude
+                    windowCount += 1
+                }
+                
+                let windowAvg = windowCount > 0 ? windowSum / Float(windowCount) : 0
+                
+                // If this window is at noise floor level
+                if windowMax < significantThreshold && windowAvg < noiseThreshold * 1.5 {
+                    firstNoiseFloorSample = i
+                    break
+                }
+            }
+            
+            // Determine the best endpoint
+            let endpointPos: Int
+            let silenceBuffer = Int(sampleRate * 0.3) // 300ms buffer after silence starts
+            
+            if let noiseStart = firstNoiseFloorSample {
+                // If we found where it drops to noise floor, add 300ms
+                endpointPos = min(noiseStart + silenceBuffer, nextMarkerPos - 1)
+                print("Found noise floor crossing at \(noiseStart), endpoint at \(endpointPos)")
+            } else if lastSignificantSample < nextMarkerPos - Int(sampleRate * 0.1) {
+                // If the last significant sample is well before the end, add 300ms after it
+                endpointPos = min(lastSignificantSample + silenceBuffer, nextMarkerPos - 1)
+                print("Using last significant sample at \(lastSignificantSample), endpoint at \(endpointPos)")
+            } else {
+                // Otherwise, try to find a good decay point using amplitude gradient
+                var maxGradientPos = startPos + Int(sampleRate * 0.1) // Default to 100ms
+                var maxGradient: Float = 0
+                
+                let gradientWindow = Int(sampleRate * 0.01) // 10ms
+                for i in startPos + gradientWindow..<min(startPos + Int(sampleRate * 0.5), nextMarkerPos - gradientWindow) {
+                    let before = abs(buffer.samples[i - gradientWindow])
+                    let after = abs(buffer.samples[i + gradientWindow])
+                    let gradient = before - after
+                    
+                    if gradient > maxGradient && after < peakAmplitude * 0.1 {
+                        maxGradient = gradient
+                        maxGradientPos = i
+                    }
+                }
+                
+                endpointPos = min(maxGradientPos + silenceBuffer, nextMarkerPos - 1)
+                print("Using max gradient position at \(maxGradientPos), endpoint at \(endpointPos)")
+            }
+            
+            // Update the marker's custom end position
+            if let markerIndex = markers.firstIndex(where: { $0.id == marker.id }) {
+                markers[markerIndex].customEndPosition = endpointPos
+                endpointsDetected += 1
+                let timeFromStart = Double(endpointPos - startPos) / sampleRate
+                print("Set endpoint for region \(index) at \(endpointPos) (\(String(format: "%.3f", timeFromStart))s from start)")
+            }
+        }
+        
+        // Force UI update
+        objectWillChange.send()
+        
+        print("Detected endpoints for \(endpointsDetected)/\(markers.count) regions")
+    }
+    
     func startTransientInspection() {
         // Include ALL markers
         guard !markers.isEmpty else { return }
@@ -1632,6 +1984,147 @@ final class EnhancedAudioViewModel: ObservableObject {
         zoomLevel = 1.0
         scrollOffset = 0.0
         // Keep currentTransientIndex so we can resume where we left off
+    }
+    
+    func analyzeCurrentRegionAmplitude() {
+        guard let buffer = sampleBuffer,
+              currentTransientIndex >= 0,
+              currentTransientIndex < markers.count else { return }
+        
+        let sortedMarkers = markers.sorted { $0.samplePosition < $1.samplePosition }
+        let currentMarker = sortedMarkers[currentTransientIndex]
+        let startPos = currentMarker.samplePosition
+        
+        // Determine end position
+        let endPos: Int
+        if let customEnd = currentMarker.customEndPosition {
+            endPos = customEnd
+        } else if currentTransientIndex < sortedMarkers.count - 1 {
+            endPos = sortedMarkers[currentTransientIndex + 1].samplePosition
+        } else {
+            endPos = min(startPos + Int(sampleRate * 2.0), buffer.count)
+        }
+        
+        print("\n=== AMPLITUDE ANALYSIS FOR REGION \(currentTransientIndex) ===")
+        print("Region: \(startPos) to \(endPos) (\(endPos - startPos) samples)")
+        print("Duration: \(String(format: "%.3f", Double(endPos - startPos) / sampleRate)) seconds")
+        
+        // Analyze peak amplitude
+        var peakAmplitude: Float = 0
+        var peakPosition = startPos
+        
+        for i in startPos..<min(endPos, buffer.count) {
+            let amplitude = abs(buffer.samples[i])
+            if amplitude > peakAmplitude {
+                peakAmplitude = amplitude
+                peakPosition = i
+            }
+        }
+        
+        print("\nPeak Analysis:")
+        print("Peak amplitude: \(peakAmplitude) (\(String(format: "%.1f", 20 * log10(max(0.0001, peakAmplitude)))) dB)")
+        print("Peak position: \(peakPosition) (\(String(format: "%.3f", Double(peakPosition - startPos) / sampleRate))s from start)")
+        
+        // Analyze amplitude over time in chunks
+        let chunkDuration = 0.01 // 10ms chunks
+        let samplesPerChunk = Int(sampleRate * chunkDuration)
+        var chunks: [(time: Double, avgAmplitude: Float, maxAmplitude: Float)] = []
+        
+        var position = startPos
+        while position < endPos && position < buffer.count {
+            let chunkEnd = min(position + samplesPerChunk, endPos, buffer.count)
+            var sum: Float = 0
+            var maxInChunk: Float = 0
+            
+            for i in position..<chunkEnd {
+                let amplitude = abs(buffer.samples[i])
+                sum += amplitude
+                maxInChunk = max(maxInChunk, amplitude)
+            }
+            
+            let avgAmplitude = sum / Float(chunkEnd - position)
+            let timeFromStart = Double(position - startPos) / sampleRate
+            chunks.append((time: timeFromStart, avgAmplitude: avgAmplitude, maxAmplitude: maxInChunk))
+            
+            position = chunkEnd
+        }
+        
+        print("\nAmplitude decay profile (10ms chunks):")
+        print("Time(s)\tAvg Amp\tMax Amp\tAvg dB\tMax dB")
+        
+        // Print first 10 chunks, then every 10th chunk, then last 10 chunks
+        for (index, chunk) in chunks.enumerated() {
+            if index < 10 || index >= chunks.count - 10 || index % 10 == 0 {
+                let avgDB = 20 * log10(max(0.0001, chunk.avgAmplitude))
+                let maxDB = 20 * log10(max(0.0001, chunk.maxAmplitude))
+                print(String(format: "%.3f\t%.4f\t%.4f\t%.1f\t%.1f", 
+                           chunk.time, chunk.avgAmplitude, chunk.maxAmplitude, avgDB, maxDB))
+            }
+        }
+        
+        // Find silence threshold crossings
+        print("\nSilence detection analysis:")
+        let thresholds: [(name: String, value: Float)] = [
+            ("1% of peak", peakAmplitude * 0.01),
+            ("2% of peak", peakAmplitude * 0.02),
+            ("5% of peak", peakAmplitude * 0.05),
+            ("10% of peak", peakAmplitude * 0.1),
+            ("-60dB", 0.001),
+            ("-40dB", 0.01)
+        ]
+        
+        for threshold in thresholds {
+            var firstCrossing: Int? = nil
+            var consecutiveSamples = 0
+            let requiredSamples = Int(sampleRate * 0.01) // 10ms
+            
+            for i in startPos..<min(endPos, buffer.count) {
+                if abs(buffer.samples[i]) < threshold.value {
+                    consecutiveSamples += 1
+                    if consecutiveSamples >= requiredSamples && firstCrossing == nil {
+                        firstCrossing = i - consecutiveSamples + 1
+                    }
+                } else {
+                    consecutiveSamples = 0
+                }
+            }
+            
+            if let crossing = firstCrossing {
+                let timeFromStart = Double(crossing - startPos) / sampleRate
+                print("\(threshold.name) (\(String(format: "%.4f", threshold.value))): crossed at \(String(format: "%.3f", timeFromStart))s")
+            } else {
+                print("\(threshold.name) (\(String(format: "%.4f", threshold.value))): never crossed")
+            }
+        }
+        
+        // Check for tape hiss/room tone
+        let tailStart = max(startPos, endPos - Int(sampleRate * 0.1)) // Last 100ms
+        var tailSum: Float = 0
+        var tailCount = 0
+        
+        for i in tailStart..<min(endPos, buffer.count) {
+            tailSum += abs(buffer.samples[i])
+            tailCount += 1
+        }
+        
+        if tailCount > 0 {
+            let avgTailAmplitude = tailSum / Float(tailCount)
+            let avgTailDB = 20 * log10(max(0.0001, avgTailAmplitude))
+            print("\nTail analysis (last 100ms):")
+            print("Average amplitude: \(avgTailAmplitude) (\(String(format: "%.1f", avgTailDB)) dB)")
+            
+            if avgTailAmplitude > 0.0001 {
+                print("⚠️  Significant room tone/tape hiss detected")
+            }
+        }
+        
+        print("\nCurrent endpoint: \(endPos) (\(String(format: "%.3f", Double(endPos - startPos) / sampleRate))s from start)")
+        if currentMarker.customEndPosition != nil {
+            print("✓ Custom endpoint set")
+        } else {
+            print("✗ Using default endpoint (next marker or file end)")
+        }
+        print("=====================================\n")
     }
     
     func mergeWithNextRegion() {
@@ -1741,20 +2234,24 @@ final class EnhancedAudioViewModel: ObservableObject {
         } else if index < allMarkersSorted.count - 1 {
             endPosition = allMarkersSorted[index + 1].samplePosition
         } else {
-            endPosition = totalSamples
+            endPosition = zoneStartOffset + zoneTotalSamples
         }
         
+        // Convert positions to zone-relative
+        let zoneRelativeTransientPos = transientPosition - zoneStartOffset
+        let zoneRelativeEndPos = endPosition - zoneStartOffset
+        
         // Calculate the region size
-        let regionSize = endPosition - transientPosition
-        let regionSizeRatio = Double(regionSize) / Double(totalSamples)
+        let regionSize = zoneRelativeEndPos - zoneRelativeTransientPos
+        let regionSizeRatio = Double(regionSize) / Double(zoneTotalSamples)
         
         // Set zoom to show the entire region with some padding
         let paddingRatio = 0.2 // 20% padding on each side
         let targetZoom = 1.0 / (regionSizeRatio * (1.0 + paddingRatio * 2))
         zoomLevel = min(targetZoom, 50.0) // Cap at 50x zoom
         
-        // Center the view on the region
-        let regionCenter = Double(transientPosition + regionSize / 2) / Double(totalSamples)
+        // Center the view on the region (zone-relative)
+        let regionCenter = Double(zoneRelativeTransientPos + regionSize / 2) / Double(zoneTotalSamples)
         scrollOffset = max(0, min(1.0 - 1.0/zoomLevel, regionCenter - 0.5/zoomLevel))
     }
     
@@ -1890,7 +2387,15 @@ final class EnhancedAudioViewModel: ObservableObject {
                 }
             }
         } else {
-            // Play entire file
+            // Play current zone (or entire file if no zones)
+            if let zone = currentZone {
+                // Reset to start of current zone before playing
+                guard let player = audioPlayer else { return }
+                let sampleRate = player.format.sampleRate
+                let startTime = TimeInterval(zone.startSample) / sampleRate
+                player.currentTime = startTime
+                playheadPosition = Double(zone.startSample)
+            }
             togglePlayback()
         }
     }
@@ -1917,6 +2422,157 @@ final class EnhancedAudioViewModel: ObservableObject {
         stopPlayheadTracking()
     }
     
+    func setPlayheadPosition(_ position: Double) {
+        playheadPosition = position
+        
+        // Update audio player's current time if not playing
+        if let player = audioPlayer, !isPlaying {
+            let timeInSeconds = position / sampleRate
+            player.currentTime = timeInSeconds
+        }
+    }
+    
+    // MARK: Zone navigation
+    func nextZone() {
+        guard !zones.isEmpty else { return }
+        
+        // Save current zone's markers
+        saveCurrentZoneMarkers()
+        
+        // Find next non-ignored zone
+        var nextIndex = currentZoneIndex
+        repeat {
+            nextIndex = min(nextIndex + 1, zones.count - 1)
+            if nextIndex == currentZoneIndex {
+                break // No more zones to check
+            }
+        } while nextIndex < zones.count && zones[nextIndex].isIgnored
+        
+        if nextIndex != currentZoneIndex && !zones[nextIndex].isIgnored {
+            currentZoneIndex = nextIndex
+            
+            // Load new zone's markers
+            loadZoneMarkers()
+            
+            // Reset view
+            zoomLevel = 1.0
+            scrollOffset = 0.0
+            
+            // Recalculate Y-scale for the new zone
+            calculateDefaultYScale()
+        }
+    }
+    
+    func previousZone() {
+        guard !zones.isEmpty else { return }
+        
+        // Save current zone's markers
+        saveCurrentZoneMarkers()
+        
+        // Find previous non-ignored zone
+        var prevIndex = currentZoneIndex
+        repeat {
+            prevIndex = max(prevIndex - 1, 0)
+            if prevIndex == currentZoneIndex {
+                break // No more zones to check
+            }
+        } while prevIndex >= 0 && zones[prevIndex].isIgnored
+        
+        if prevIndex != currentZoneIndex && !zones[prevIndex].isIgnored {
+            currentZoneIndex = prevIndex
+            
+            // Load new zone's markers
+            loadZoneMarkers()
+            
+            // Reset view
+            zoomLevel = 1.0
+            scrollOffset = 0.0
+            
+            // Recalculate Y-scale for the new zone
+            calculateDefaultYScale()
+        }
+    }
+    
+    private func saveCurrentZoneMarkers() {
+        // Store markers for the current zone
+        guard let zone = currentZone else { return }
+        
+        let zoneData = ZoneData(
+            markers: markers,
+            transientMarkers: transientMarkers,
+            tempSelection: tempSelection,
+            pendingGroupAssignment: pendingGroupAssignment,
+            hasDetectedTransients: hasDetectedTransients
+        )
+        zoneDataStorage[zone.id] = zoneData
+    }
+    
+    private func loadZoneMarkers() {
+        // Load markers for the new zone
+        guard let zone = currentZone else { return }
+        
+        if let zoneData = zoneDataStorage[zone.id] {
+            // Restore saved data
+            markers = zoneData.markers
+            transientMarkers = zoneData.transientMarkers
+            tempSelection = zoneData.tempSelection
+            pendingGroupAssignment = zoneData.pendingGroupAssignment
+            hasDetectedTransients = zoneData.hasDetectedTransients
+        } else {
+            // Clear for new zone
+            markers.removeAll()
+            transientMarkers.removeAll()
+            tempSelection = nil
+            pendingGroupAssignment = nil
+            hasDetectedTransients = false
+        }
+        
+        // Reset inspection index for the new zone
+        currentTransientIndex = 0
+        
+        // Update Y scale for the new zone
+        updateYScaleForCurrentZone()
+    }
+    
+    private func updateYScaleForCurrentZone() {
+        calculateDefaultYScale()
+    }
+    
+    private func calculateDefaultYScale() {
+        guard let buffer = sampleBuffer else { return }
+        
+        let startIdx: Int
+        let endIdx: Int
+        
+        if let zone = currentZone {
+            startIdx = zone.startSample
+            endIdx = zone.endSample
+        } else {
+            startIdx = 0
+            endIdx = buffer.count
+        }
+        
+        // Find max amplitude in the current zone
+        var maxAmplitude: Float = 0
+        let sampleCount = min(endIdx, buffer.count) - startIdx
+        print("Calculating Y-scale for zone: start=\(startIdx), end=\(endIdx), samples=\(sampleCount)")
+        
+        for i in startIdx..<min(endIdx, buffer.count) {
+            let amplitude = abs(buffer.samples[i])
+            maxAmplitude = max(maxAmplitude, amplitude)
+        }
+        
+        print("Zone max amplitude: \(maxAmplitude)")
+        if maxAmplitude > 0 {
+            // Scale so that the loudest part uses ~90% of the height
+            // Since waveform is normalized to [-1, 1], we want maxAmplitude * yScale = 0.9
+            yScale = Double(1 / maxAmplitude)
+        } else {
+            yScale = 1.0
+        }
+        print("Y scale set to: \(yScale) (max amplitude * yScale = \(maxAmplitude * Float(yScale)))")
+    }
+    
     private func startPlayheadTracking() {
         stopPlayheadTracking() // Clear any existing timer
         
@@ -1924,6 +2580,13 @@ final class EnhancedAudioViewModel: ObservableObject {
             if let player = self.audioPlayer, let rate = self.sampleBuffer?.samples.count {
                 let sampleRate = player.format.sampleRate
                 self.playheadPosition = player.currentTime * sampleRate
+                
+                // Check if we've reached the end of the current zone
+                if let zone = self.currentZone {
+                    if self.playheadPosition >= Double(zone.endSample) {
+                        self.stopPlayback()
+                    }
+                }
             }
         }
     }
@@ -1961,10 +2624,10 @@ struct EnhancedWaveformView: View {
                                 Waveform(
                                     samples: buffer,
                                     start: viewModel.visibleStart,
-                                    length: viewModel.visibleLength
+                                    length: viewModel.visibleLength,
+                                    yScale: viewModel.yScale
                                 )
                                 .foregroundColor(.blue)
-                                .scaleEffect(y: CGFloat(viewModel.yScale))
                                 .clipped() // Ensure scaling doesn't extend beyond bounds
                                 .allowsHitTesting(false)
                             }
@@ -1972,8 +2635,8 @@ struct EnhancedWaveformView: View {
                             
                             // Markers and playhead overlay
                             Canvas { context, size in
-                                // Draw playhead if playing
-                                if viewModel.isPlaying {
+                                // Draw playhead
+                                if viewModel.playheadPosition > 0 || viewModel.isPlaying {
                                     let playheadX = viewModel.xPosition(for: Int(viewModel.playheadPosition), in: size.width)
                                     if playheadX >= 0 && playheadX <= size.width {
                                         var playheadPath = Path()
@@ -2202,6 +2865,9 @@ struct EnhancedWaveformView: View {
                                                 // This was effectively a tap, not a drag
                                                 // Clear any existing selection
                                                 viewModel.clearSelection()
+                                                // Set playhead position to click location
+                                                let samplePosition = viewModel.sampleIndex(for: value.location.x, in: geometry.size.width)
+                                                viewModel.setPlayheadPosition(Double(samplePosition))
                                             } else {
                                                 viewModel.commitSelection()
                                             }
@@ -2279,21 +2945,32 @@ struct EnhancedWaveformView: View {
 // MARK: - Minimap Waveform with auto Y-scale
 struct MinimapWaveform: View {
     let samples: SampleBuffer
+    var startOffset: Int = 0
+    var endOffset: Int? = nil
     
     var body: some View {
         GeometryReader { geometry in
             Canvas { context, size in
                 guard !samples.samples.isEmpty else { return }
                 
+                // Use specified range or full buffer
+                let actualEndOffset = endOffset ?? samples.samples.count
+                let rangeStart = max(0, min(startOffset, samples.samples.count - 1))
+                let rangeEnd = max(rangeStart, min(actualEndOffset, samples.samples.count))
+                let rangeLength = rangeEnd - rangeStart
+                
+                guard rangeLength > 0 else { return }
+                
                 // Downsample for minimap (we don't need full resolution)
-                let targetSampleCount = min(Int(size.width * 2), samples.samples.count)
-                let step = max(1, samples.samples.count / targetSampleCount)
+                let targetSampleCount = min(Int(size.width * 2), rangeLength)
+                let step = max(1, rangeLength / targetSampleCount)
                 var displaySamples: [Float] = []
                 
-                for i in stride(from: 0, to: samples.samples.count, by: step) {
+                for i in stride(from: 0, to: rangeLength, by: step) {
                     // Take max of the chunk for better visualization
-                    let endIndex = min(i + step, samples.samples.count)
-                    let chunk = samples.samples[i..<endIndex]
+                    let startIdx = rangeStart + i
+                    let endIndex = min(startIdx + step, rangeEnd)
+                    let chunk = samples.samples[startIdx..<endIndex]
                     let maxValue = chunk.map { abs($0) }.max() ?? 0
                     displaySamples.append(maxValue)
                 }
@@ -2347,21 +3024,38 @@ struct MinimapView: View {
                             .fill(Color.gray.opacity(0.1))
                         
                         if let buffer = viewModel.sampleBuffer {
-                            MinimapWaveform(samples: buffer)
+                            // Show only the current zone's portion of the waveform
+                            if let zone = viewModel.currentZone {
+                                MinimapWaveform(
+                                    samples: buffer,
+                                    startOffset: zone.startSample,
+                                    endOffset: zone.endSample
+                                )
                                 .foregroundColor(.gray.opacity(0.7))
                                 .allowsHitTesting(false)
+                            } else {
+                                MinimapWaveform(samples: buffer)
+                                    .foregroundColor(.gray.opacity(0.7))
+                                    .allowsHitTesting(false)
+                            }
                         }
                         
                         // Transient/marker tick lines
                         Canvas { context, size in
                             for marker in viewModel.markers {
-                                let markerPosition = Double(marker.samplePosition) / Double(viewModel.totalSamples)
+                                // Convert marker position to zone-relative position
+                                let zoneRelativePosition = marker.samplePosition - viewModel.zoneStartOffset
+                                let markerPosition = Double(zoneRelativePosition) / Double(viewModel.zoneTotalSamples)
                                 let x = markerPosition * size.width
-                                var line = Path()
-                                line.move(to: CGPoint(x: x, y: 0))
-                                line.addLine(to: CGPoint(x: x, y: size.height))
-                                let c: Color = marker.group == nil ? .red.opacity(0.5) : .green.opacity(0.5)
-                                context.stroke(line, with: .color(c), lineWidth: 0.5)
+                                
+                                // Only draw if within visible range
+                                if x >= 0 && x <= size.width {
+                                    var line = Path()
+                                    line.move(to: CGPoint(x: x, y: 0))
+                                    line.addLine(to: CGPoint(x: x, y: size.height))
+                                    let c: Color = marker.group == nil ? .red.opacity(0.5) : .green.opacity(0.5)
+                                    context.stroke(line, with: .color(c), lineWidth: 0.5)
+                                }
                             }
                         }
                         .allowsHitTesting(false)
@@ -2523,7 +3217,15 @@ struct WaveformControls: View {
             // Zoom controls
             HStack {
                 Text("Zoom:")
-                Slider(value: $viewModel.zoomLevel, in: 1...500)
+                Slider(value: Binding(
+                    get: { viewModel.zoomLevel },
+                    set: { newValue in
+                        // Calculate the center of the view to zoom around
+                        let centerLocation = 0.5 // Center of the view
+                        let factor = newValue / viewModel.zoomLevel
+                        viewModel.zoom(by: factor, at: centerLocation * 200, in: 200) // Using slider width as reference
+                    }
+                ), in: 1...100)
                     .frame(width: 200)
                 Text(String(format: "%.1fx", viewModel.zoomLevel))
                     .frame(width: 50)

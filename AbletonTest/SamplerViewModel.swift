@@ -41,6 +41,12 @@ class SamplerViewModel: ObservableObject {
     /// Current mapping mode
     @Published var currentMappingMode: MappingMode = .standard
     
+    /// Master envelope parameters
+    @Published var masterEnvelopeAttack: Double = 1.0
+    @Published var masterEnvelopeDecay: Double = 1.0
+    @Published var masterEnvelopeSustain: Double = 0.0
+    @Published var masterEnvelopeRelease: Double = 50.0
+    
     /// Reference to the audio view model for transient detection
     var audioViewModel: EnhancedAudioViewModel?
     
@@ -385,6 +391,23 @@ class SamplerViewModel: ObservableObject {
         }
     }
     
+    func saveToADGFile() {
+        showingSavePanel = true
+        
+        let savePanel = NSSavePanel()
+        savePanel.allowedContentTypes = [UTType(filenameExtension: "adg")!]
+        savePanel.nameFieldStringValue = "MyDrumRack.adg"
+        savePanel.title = "Save Ableton Drum Rack Preset"
+        savePanel.message = "Choose where to save your drum rack preset file"
+        
+        savePanel.begin { response in
+            if response == .OK, let url = savePanel.url {
+                self.performADGSave(to: url)
+            }
+            self.showingSavePanel = false
+        }
+    }
+    
     private func performSave(to url: URL) {
         do {
             let projectDir = url.deletingLastPathComponent()
@@ -414,6 +437,38 @@ class SamplerViewModel: ObservableObject {
             print("Successfully saved ADV file to: \(url.path)")
         } catch {
             showError("Failed to save ADV file: \(error.localizedDescription)")
+        }
+    }
+    
+    private func performADGSave(to url: URL) {
+        do {
+            let projectDir = url.deletingLastPathComponent()
+            
+            // Update paths in multiSampleParts
+            for i in multiSampleParts.indices {
+                let sourceURL = multiSampleParts[i].sourceFileURL
+                let relativePath = sourceURL.lastPathComponent
+                multiSampleParts[i].relativePath = relativePath // Just the filename
+            }
+            
+            // Generate ADG XML
+            let xmlString = generateADGContent(projectPath: projectDir.path)
+            
+            guard let xmlData = xmlString.data(using: .utf8) else {
+                throw NSError(domain: "SamplerViewModel", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not convert XML to data"])
+            }
+            
+            // Compress with gzip
+            guard let compressedData = gzipData(xmlData) else {
+                throw NSError(domain: "SamplerViewModel", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to compress XML data"])
+            }
+            
+            // Write to file
+            try compressedData.write(to: url)
+            
+            print("Successfully saved ADG file to: \(url.path)")
+        } catch {
+            showError("Failed to save ADG file: \(error.localizedDescription)")
         }
     }
     
@@ -469,10 +524,15 @@ class SamplerViewModel: ObservableObject {
     }
     
     func generateFullXmlString(projectPath: String) -> String {
-        let samplePartsXml = generateSamplePartsXml(projectPath: projectPath)
+        return generateFullXmlString(projectPath: projectPath, partsFilter: nil)
+    }
+    
+    private func generateFullXmlString(projectPath: String, partsFilter: [MultiSamplePartData]? = nil) -> String {
+        let parts = partsFilter ?? multiSampleParts
+        let samplePartsXml = parts.map { generateMultiSamplePartXml($0, projectPath: projectPath) }.joined(separator: "\n")
         
         // Check if we have round robins (multiple samples with same key and velocity range)
-        let hasRoundRobins = detectRoundRobins()
+        let hasRoundRobins = detectRoundRobins(in: parts)
         let roundRobinValue = hasRoundRobins ? "true" : "false"
         let roundRobinModeValue = "2" // 2 = other mode
         let randomSeed = Int.random(in: 1...1000000000)
@@ -522,7 +582,23 @@ class SamplerViewModel: ObservableObject {
                 </Filter>
                 <VolumeAndPan>
                     <Volume><Manual Value="-12" /></Volume>
+                    <VolumeVelScale><Manual Value="0.0" /></VolumeVelScale>
+                    <VolumeLfoAmount><Manual Value="0.0" /></VolumeLfoAmount>
                     <Panorama><Manual Value="0" /></Panorama>
+                    <PanoramaRnd><Manual Value="0.0" /></PanoramaRnd>
+                    <PanoramaLfoAmount><Manual Value="0.0" /></PanoramaLfoAmount>
+                    
+                    <Envelope>
+                        <AttackTime><Manual Value="\(masterEnvelopeAttack)" /></AttackTime>
+                        <AttackLevel><Manual Value="0.0" /></AttackLevel>
+                        <DecayTime><Manual Value="\(masterEnvelopeDecay)" /></DecayTime>
+                        <DecayLevel><Manual Value="1.0" /></DecayLevel>
+                        <SustainLevel><Manual Value="\(convertDBToLinear(masterEnvelopeSustain))" /></SustainLevel>
+                        <ReleaseTime><Manual Value="\(masterEnvelopeRelease)" /></ReleaseTime>
+                        <ReleaseLevel><Manual Value="0.0" /></ReleaseLevel>
+                        <LoopMode><Manual Value="0" /></LoopMode>
+                        <TimeVelScale><Manual Value="0.0" /></TimeVelScale>
+                    </Envelope>
                 </VolumeAndPan>
                 <Globals>
                     <NumVoices Value="\(voiceCountToMenuIndex(voiceCount: 24))" />
@@ -635,6 +711,474 @@ class SamplerViewModel: ObservableObject {
         """
     }
     
+    func generateADGContent(projectPath: String) -> String {
+        // Group samples by their root key
+        var samplesByKey: [Int: [MultiSamplePartData]] = [:]
+        
+        for part in multiSampleParts {
+            if samplesByKey[part.rootKey] == nil {
+                samplesByKey[part.rootKey] = []
+            }
+            samplesByKey[part.rootKey]?.append(part)
+        }
+        
+        // Sort keys to process them in order
+        let sortedKeys = samplesByKey.keys.sorted()
+        
+        // Generate drum branch presets for each key
+        var drumBranchPresets = ""
+        
+        for (index, key) in sortedKeys.enumerated() {
+            guard let partsForKey = samplesByKey[key] else { continue }
+            
+            // Generate the full ADV content for this key
+            let advXml = generateFullXmlString(projectPath: projectPath, partsFilter: partsForKey)
+            
+            // Extract just the MultiSampler section INCLUDING the opening tag with Id attribute
+            if let startRange = advXml.range(of: "<MultiSampler"),
+               let endRange = advXml.range(of: "</MultiSampler>") {
+                let multiSamplerXml = String(advXml[startRange.lowerBound...endRange.upperBound])
+                
+                // Add the required device-level tags that were missing
+                let completeMultiSamplerXml = """
+                                            <MultiSampler Id="0">
+                                                <LomId Value="0" />
+                                                <LomIdView Value="0" />
+                                                <IsExpanded Value="true" />
+                                                <On>
+                                                    <LomId Value="0" />
+                                                    <Manual Value="true" />
+                                                    <AutomationTarget Id="0">
+                                                        <LockEnvelope Value="0" />
+                                                    </AutomationTarget>
+                                                    <MidiCCOnOffThresholds>
+                                                        <Min Value="64" />
+                                                        <Max Value="127" />
+                                                    </MidiCCOnOffThresholds>
+                                                </On>
+                                                <ParametersListWrapper LomId="0" />
+                                                <LastSelectedTimeableIndex Value="0" />
+                                                <LastSelectedClipEnvelopeIndex Value="0" />
+                                                <LastPresetRef>
+                                                    <Value />
+                                                </LastPresetRef>
+                                                <LockedScripts />
+                                                <IsFolded Value="false" />
+                                                <ShouldShowPresetName Value="true" />
+                                                <UserName Value="Sampler" />
+                                                <Annotation Value="" />
+                                                <SourceContext>
+                                                    <Value />
+                                                </SourceContext>
+                                                <OverwriteProtectionNumber Value="2816" />
+                """
+                
+                // Extract the inner content of the MultiSampler, but skip the duplicate LomId
+                if let innerStartRange = multiSamplerXml.range(of: ">"),
+                   let innerEndRange = multiSamplerXml.range(of: "</MultiSampler>") {
+                    var innerContent = String(multiSamplerXml[multiSamplerXml.index(after: innerStartRange.lowerBound)..<innerEndRange.lowerBound])
+                    
+                    // Remove the duplicate LomId tag that's at the beginning
+                    if innerContent.range(of: "<LomId Value=\"0\" />") != nil {
+                        // Find where Player starts
+                        if let playerRange = innerContent.range(of: "<Player>") {
+                            // Extract everything from Player onwards
+                            innerContent = String(innerContent[playerRange.lowerBound...])
+                        }
+                    }
+                    
+                    drumBranchPresets += """
+                            <DrumBranchPreset Id="\(index)">
+                                <DevicePresets>
+                                    <AbletonDevicePreset Id="0">
+                                        <Device>
+                \(completeMultiSamplerXml)
+                \(innerContent)
+                                            </MultiSampler>
+                                        </Device>
+                                        <PresetRef>
+                                            <AbletonDefaultPresetRef Id="0">
+                                                <DeviceId Name="MultiSampler" />
+                                            </AbletonDefaultPresetRef>
+                                        </PresetRef>
+                                    </AbletonDevicePreset>
+                                </DevicePresets>
+                                
+                                <MixerPreset>
+                                    <AbletonDevicePreset Id="0">
+                                        <Device>
+                                            <AudioBranchMixerDevice Id="0">
+                                                <LomId Value="0" />
+                                                <IsExpanded Value="true" />
+                                                <On>
+                                                    <LomId Value="0" />
+                                                    <Manual Value="true" />
+                                                    <AutomationTarget Id="0">
+                                                        <LockEnvelope Value="0" />
+                                                    </AutomationTarget>
+                                                    <MidiCCOnOffThresholds>
+                                                        <Min Value="64" />
+                                                        <Max Value="127" />
+                                                    </MidiCCOnOffThresholds>
+                                                </On>
+                                                <Volume>
+                                                    <LomId Value="0" />
+                                                    <Manual Value="1" />
+                                                    <MidiControllerRange>
+                                                        <Min Value="0.0003162277571" />
+                                                        <Max Value="1.99526238" />
+                                                    </MidiControllerRange>
+                                                    <AutomationTarget Id="0">
+                                                        <LockEnvelope Value="0" />
+                                                    </AutomationTarget>
+                                                    <ModulationTarget Id="0">
+                                                        <LockEnvelope Value="0" />
+                                                    </ModulationTarget>
+                                                </Volume>
+                                                <Panorama>
+                                                    <LomId Value="0" />
+                                                    <Manual Value="0" />
+                                                    <MidiControllerRange>
+                                                        <Min Value="-1" />
+                                                        <Max Value="1" />
+                                                    </MidiControllerRange>
+                                                    <AutomationTarget Id="0">
+                                                        <LockEnvelope Value="0" />
+                                                    </AutomationTarget>
+                                                    <ModulationTarget Id="0">
+                                                        <LockEnvelope Value="0" />
+                                                    </ModulationTarget>
+                                                </Panorama>
+                                            </AudioBranchMixerDevice>
+                                        </Device>
+                                        <PresetRef>
+                                            <AbletonDefaultPresetRef Id="0">
+                                                <DeviceId Name="AudioBranchMixerDevice" />
+                                            </AbletonDefaultPresetRef>
+                                        </PresetRef>
+                                    </AbletonDevicePreset>
+                                </MixerPreset>
+                                
+                                <IsSoloed Value="false" />
+                                <SessionViewBranchWidth Value="55" />
+                                <ColorIndex Value="162" />
+                                <AutoColorIndex Value="162" />
+                                <AutoColor Value="true" />
+                                <ZoneSettings>
+                                    <ReceivingNote Value="\(key)" />
+                                    <SendingNote Value="\(key)" />
+                                    <ChokeGroup Value="0" />
+                                </ZoneSettings>
+                            </DrumBranchPreset>
+                
+                """
+                }
+            }
+        }
+        
+        // Generate the complete ADG XML
+        return """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <Ableton MajorVersion="5" MinorVersion="12.0_12203" SchemaChangeCount="3" Creator="AbletonTest" Revision="Generated">
+            <GroupDevicePreset>
+                <OverwriteProtectionNumber Value="0" />
+                <Device>
+                    <DrumGroupDevice Id="0">
+                        <LomId Value="0" />
+                        <IsExpanded Value="true" />
+                        <On>
+                            <LomId Value="0" />
+                            <Manual Value="true" />
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <MidiCCOnOffThresholds>
+                                <Min Value="64" />
+                                <Max Value="127" />
+                            </MidiCCOnOffThresholds>
+                        </On>
+                        <UserName Value="Generated Drum Rack" />
+                        <Annotation Value="Created by AbletonTest" />
+                        
+                        <MacroControls.0>
+                            <LomId Value="0" />
+                            <Manual Value="0" />
+                            <MidiControllerRange>
+                                <Min Value="0" />
+                                <Max Value="127" />
+                            </MidiControllerRange>
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <ModulationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </ModulationTarget>
+                        </MacroControls.0>
+                        <MacroControls.1>
+                            <LomId Value="0" />
+                            <Manual Value="0" />
+                            <MidiControllerRange>
+                                <Min Value="0" />
+                                <Max Value="127" />
+                            </MidiControllerRange>
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <ModulationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </ModulationTarget>
+                        </MacroControls.1>
+                        <MacroControls.2>
+                            <LomId Value="0" />
+                            <Manual Value="0" />
+                            <MidiControllerRange>
+                                <Min Value="0" />
+                                <Max Value="127" />
+                            </MidiControllerRange>
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <ModulationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </ModulationTarget>
+                        </MacroControls.2>
+                        <MacroControls.3>
+                            <LomId Value="0" />
+                            <Manual Value="0" />
+                            <MidiControllerRange>
+                                <Min Value="0" />
+                                <Max Value="127" />
+                            </MidiControllerRange>
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <ModulationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </ModulationTarget>
+                        </MacroControls.3>
+                        <MacroControls.4>
+                            <LomId Value="0" />
+                            <Manual Value="0" />
+                            <MidiControllerRange>
+                                <Min Value="0" />
+                                <Max Value="127" />
+                            </MidiControllerRange>
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <ModulationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </ModulationTarget>
+                        </MacroControls.4>
+                        <MacroControls.5>
+                            <LomId Value="0" />
+                            <Manual Value="0" />
+                            <MidiControllerRange>
+                                <Min Value="0" />
+                                <Max Value="127" />
+                            </MidiControllerRange>
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <ModulationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </ModulationTarget>
+                        </MacroControls.5>
+                        <MacroControls.6>
+                            <LomId Value="0" />
+                            <Manual Value="0" />
+                            <MidiControllerRange>
+                                <Min Value="0" />
+                                <Max Value="127" />
+                            </MidiControllerRange>
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <ModulationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </ModulationTarget>
+                        </MacroControls.6>
+                        <MacroControls.7>
+                            <LomId Value="0" />
+                            <Manual Value="0" />
+                            <MidiControllerRange>
+                                <Min Value="0" />
+                                <Max Value="127" />
+                            </MidiControllerRange>
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <ModulationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </ModulationTarget>
+                        </MacroControls.7>
+                        <MacroControls.8>
+                            <LomId Value="0" />
+                            <Manual Value="0" />
+                            <MidiControllerRange>
+                                <Min Value="0" />
+                                <Max Value="127" />
+                            </MidiControllerRange>
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <ModulationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </ModulationTarget>
+                        </MacroControls.8>
+                        <MacroControls.9>
+                            <LomId Value="0" />
+                            <Manual Value="0" />
+                            <MidiControllerRange>
+                                <Min Value="0" />
+                                <Max Value="127" />
+                            </MidiControllerRange>
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <ModulationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </ModulationTarget>
+                        </MacroControls.9>
+                        <MacroControls.10>
+                            <LomId Value="0" />
+                            <Manual Value="0" />
+                            <MidiControllerRange>
+                                <Min Value="0" />
+                                <Max Value="127" />
+                            </MidiControllerRange>
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <ModulationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </ModulationTarget>
+                        </MacroControls.10>
+                        <MacroControls.11>
+                            <LomId Value="0" />
+                            <Manual Value="0" />
+                            <MidiControllerRange>
+                                <Min Value="0" />
+                                <Max Value="127" />
+                            </MidiControllerRange>
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <ModulationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </ModulationTarget>
+                        </MacroControls.11>
+                        <MacroControls.12>
+                            <LomId Value="0" />
+                            <Manual Value="0" />
+                            <MidiControllerRange>
+                                <Min Value="0" />
+                                <Max Value="127" />
+                            </MidiControllerRange>
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <ModulationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </ModulationTarget>
+                        </MacroControls.12>
+                        <MacroControls.13>
+                            <LomId Value="0" />
+                            <Manual Value="0" />
+                            <MidiControllerRange>
+                                <Min Value="0" />
+                                <Max Value="127" />
+                            </MidiControllerRange>
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <ModulationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </ModulationTarget>
+                        </MacroControls.13>
+                        <MacroControls.14>
+                            <LomId Value="0" />
+                            <Manual Value="0" />
+                            <MidiControllerRange>
+                                <Min Value="0" />
+                                <Max Value="127" />
+                            </MidiControllerRange>
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <ModulationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </ModulationTarget>
+                        </MacroControls.14>
+                        <MacroControls.15>
+                            <LomId Value="0" />
+                            <Manual Value="0" />
+                            <MidiControllerRange>
+                                <Min Value="0" />
+                                <Max Value="127" />
+                            </MidiControllerRange>
+                            <AutomationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </AutomationTarget>
+                            <ModulationTarget Id="0">
+                                <LockEnvelope Value="0" />
+                            </ModulationTarget>
+                        </MacroControls.15>
+                        <MacroDisplayNames.0 Value="Macro 1" />
+                        <MacroDisplayNames.1 Value="Macro 2" />
+                        <MacroDisplayNames.2 Value="Macro 3" />
+                        <MacroDisplayNames.3 Value="Macro 4" />
+                        <MacroDisplayNames.4 Value="Macro 5" />
+                        <MacroDisplayNames.5 Value="Macro 6" />
+                        <MacroDisplayNames.6 Value="Macro 7" />
+                        <MacroDisplayNames.7 Value="Macro 8" />
+                        <MacroDisplayNames.8 Value="Macro 9" />
+                        <MacroDisplayNames.9 Value="Macro 10" />
+                        <MacroDisplayNames.10 Value="Macro 11" />
+                        <MacroDisplayNames.11 Value="Macro 12" />
+                        <MacroDisplayNames.12 Value="Macro 13" />
+                        <MacroDisplayNames.13 Value="Macro 14" />
+                        <MacroDisplayNames.14 Value="Macro 15" />
+                        <MacroDisplayNames.15 Value="Macro 16" />
+                        <IsAutoSelectEnabled Value="true" />
+                        <IsMacroSectionVisible Value="true" />
+                        <AreMacroControlsVisible Value="true" />
+                        <IsUnfolded Value="true" />
+                        <ViewMode Value="1" />
+                        <IsDeviceChainVisible Value="true" />
+                        <PageViewIndex Value="0" />
+                        <NoVoiceMode Value="false" />
+                        <DrumPadsScroll Value="0" />
+                        <ShowLomDrumPadView Value="true" />
+                        <IsBranchesListVisible Value="false" />
+                        <IsBranchSelectorVisible Value="false" />
+                        <IsPadSectionVisible Value="true" />
+                        <SelectedDrumPadView Value="0" />
+                        <ArePadsVisible Value="true" />
+                        <IsDrumPadsExpanded Value="false" />
+                        <PadScrollPosition Value="24" />
+                        <ChainsListWrapper LomId="0" />
+                        <DrumPadsListWrapper LomId="0" />
+                    </DrumGroupDevice>
+                </Device>
+                
+                <PresetRef>
+                    <AbletonDefaultPresetRef Id="0">
+                        <DeviceId Name="DrumGroupDevice" />
+                    </AbletonDefaultPresetRef>
+                </PresetRef>
+                
+                <BranchPresets>
+        \(drumBranchPresets)
+                </BranchPresets>
+                
+                <ReturnBranchPresets />
+                
+            </GroupDevicePreset>
+        </Ableton>
+        """
+    }
+    
     private func generateSamplePartsXml(projectPath: String) -> String {
         return multiSampleParts.map { generateMultiSamplePartXml($0, projectPath: projectPath) }.joined(separator: "\n")
     }
@@ -703,6 +1247,14 @@ class SamplerViewModel: ObservableObject {
     
     // MARK: - Helper Methods
     
+    private func convertDBToLinear(_ db: Double) -> Double {
+        // Convert dB to linear gain
+        // 0 dB = 1.0 linear
+        // -inf dB = 0.0 linear
+        // Formula: linear = 10^(dB/20)
+        return pow(10.0, db / 20.0)
+    }
+    
     private func voiceCountToMenuIndex(voiceCount: Int) -> Int {
         // Ableton's voice menu options: 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 32
         let voiceOptions = [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 32]
@@ -717,10 +1269,14 @@ class SamplerViewModel: ObservableObject {
     }
     
     private func detectRoundRobins() -> Bool {
+        return detectRoundRobins(in: multiSampleParts)
+    }
+    
+    private func detectRoundRobins(in parts: [MultiSamplePartData]) -> Bool {
         // Group samples by key and velocity range
         var groupedSamples: [String: Int] = [:]
         
-        for part in multiSampleParts {
+        for part in parts {
             let key = "\(part.keyRangeMin)-\(part.keyRangeMax)_\(part.velocityRange.min)-\(part.velocityRange.max)"
             groupedSamples[key, default: 0] += 1
         }

@@ -216,3 +216,18 @@ struct TransientGroup: Identifiable {
         markers.count
     }
 }
+
+// MARK: - Zone Models
+
+/// Represents a zone (region) of audio within a file
+struct AudioZone: Identifiable {
+    let id = UUID()
+    var startSample: Int
+    var endSample: Int
+    var name: String
+    var isIgnored: Bool = false
+    
+    var duration: Int {
+        endSample - startSample
+    }
+}

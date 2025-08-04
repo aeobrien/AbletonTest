@@ -5,6 +5,7 @@ struct Waveform: View {
     let samples: SampleBuffer
     var start: Int = 0
     var length: Int = 0
+    var yScale: Double = 1.0
     
     @State private var cachedSamples: [Float] = []
     @State private var cachedStart: Int = -1
@@ -39,7 +40,7 @@ struct Waveform: View {
                 
                 for i in samplesToDisplay.indices {
                     let x = CGFloat(i) * step
-                    let amplitude = CGFloat(samplesToDisplay[i]) * midY * 0.9 // 90% to avoid clipping
+                    let amplitude = CGFloat(samplesToDisplay[i]) * midY * CGFloat(yScale) // Apply yScale
                     
                     // Only draw if there's actual signal
                     let displayAmplitude = amplitude
