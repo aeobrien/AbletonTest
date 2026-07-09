@@ -423,6 +423,487 @@ private func createMelFilterBank(numFilters: Int, fftSize: Int, sampleRate: Floa
     return filters
 }
 
+// MARK: - Quality Metrics for K Selection
+
+public struct ClusteringQuality {
+    let silhouette: Float
+    let daviesBouldin: Float?
+    let calinskiHarabasz: Float?
+}
+
+// Helper function to calculate cluster size entropy
+private func calculateClusterSizeEntropy(labels: [Int]) -> Float {
+    var clusterSizes: [Int: Int] = [:]
+    for label in labels {
+        clusterSizes[label, default: 0] += 1
+    }
+    
+    let n = Float(labels.count)
+    var entropy: Float = 0
+    
+    for size in clusterSizes.values {
+        let p = Float(size) / n
+        if p > 0 {
+            entropy -= p * log2(p)
+        }
+    }
+    
+    // Normalize by log2(k) to get value in [0,1]
+    let k = clusterSizes.count
+    return k > 1 ? entropy / log2(Float(k)) : 0
+}
+
+public func modelSelectionScore(_ quality: ClusteringQuality, k: Int, targetK: Int? = nil, lambda: Float = 0.15, labels: [Int]? = nil) -> Float {
+    var score = quality.silhouette
+    
+    if let dbi = quality.daviesBouldin {
+        score += max(0, 1 - min(dbi, 2)) * 0.2
+    }
+    
+    if let ch = quality.calinskiHarabasz {
+        score += min(ch / 1000, 0.2)
+    }
+    
+    // Add cluster size entropy penalty (prefer balanced clusters)
+    if let labels = labels {
+        let entropy = calculateClusterSizeEntropy(labels: labels)
+        score += entropy * 0.1 // Higher entropy = more balanced = better
+        
+        // Penalty for singleton clusters
+        var clusterSizes: [Int: Int] = [:]
+        for label in labels {
+            clusterSizes[label, default: 0] += 1
+        }
+        let singletonCount = clusterSizes.values.filter { $0 == 1 }.count
+        let singletonPenalty = Float(singletonCount) * 0.05
+        score -= singletonPenalty
+    }
+    
+    if let target = targetK {
+        score += -lambda * powf(Float(k - target), 2)
+    }
+    
+    return score
+}
+
+// MARK: - Two-Stage Grouping (RMS → Timbre)
+
+public func twoStageGrouping(
+    urls: [URL],
+    windowMs: Double = 256,
+    targetVelocityLayers: Int? = nil,
+    roundRobinsPerLayer: Int = 5
+) throws -> (groups: [[URL]], quality: ClusteringQuality, selectedK: Int, rmsRanges: [(min: Float, max: Float)]) {
+    
+    // Extract enhanced features
+    let features = try urls.map { try extractEnhancedFeatures(from: $0, adaptiveWindow: true) }
+    
+    // Stage 1: RMS binning
+    let sortedByRMS = features.enumerated().sorted { $0.element.rms < $1.element.rms }
+    let rmsValues = sortedByRMS.map { $0.element.rms }
+    let rmsClusters = identifyRMSClusters(rmsValues)
+    
+    // If target velocity layers specified, adjust RMS clusters
+    let finalRMSClusters: [(min: Float, max: Float)]
+    if let target = targetVelocityLayers, rmsClusters.count != target {
+        finalRMSClusters = adjustRMSClusters(rmsClusters, targetCount: target, rmsValues: rmsValues)
+    } else {
+        finalRMSClusters = rmsClusters
+    }
+    
+    // Stage 2: Timbre clustering within each RMS bin
+    var allGroups: [[URL]] = []
+    var overallQuality = ClusteringQuality(silhouette: 0, daviesBouldin: nil, calinskiHarabasz: nil)
+    var totalK = 0
+    
+    for (binIndex, rmsRange) in finalRMSClusters.enumerated() {
+        // Get samples in this RMS range
+        let binSamples = sortedByRMS.filter { 
+            $0.element.rms >= rmsRange.min && $0.element.rms <= rmsRange.max 
+        }
+        
+        if binSamples.isEmpty { continue }
+        
+        // Extract URLs and features for this bin
+        let binURLs = binSamples.map { urls[$0.offset] }
+        let binFeatures = binSamples.map { $0.element }
+        
+        if binURLs.count <= roundRobinsPerLayer {
+            // If few samples, keep them all as round robins
+            allGroups.append(binURLs)
+            totalK += 1
+        } else {
+            // Cluster by timbre within this RMS bin
+            let normalizedFeatures = normalizeEnhancedFeatures(binFeatures)
+            let vectors = normalizedFeatures.map { $0.featureVector }
+            
+            // Determine K for this bin (aiming for ~roundRobinsPerLayer samples per cluster)
+            let binK = max(1, min(binURLs.count / roundRobinsPerLayer, 3))
+            
+            let (binGroups, binQuality, _) = try autoGroupEnhanced(
+                urls: binURLs,
+                windowMs: windowMs,
+                targetK: binK,
+                numRestarts: 5
+            )
+            
+            allGroups.append(contentsOf: binGroups)
+            totalK += binGroups.count
+            
+            // Accumulate quality metrics (weighted by bin size)
+            let weight = Float(binURLs.count) / Float(urls.count)
+            overallQuality = ClusteringQuality(
+                silhouette: overallQuality.silhouette + binQuality.silhouette * weight,
+                daviesBouldin: nil, // Will recalculate globally
+                calinskiHarabasz: nil
+            )
+        }
+    }
+    
+    return (allGroups, overallQuality, totalK, finalRMSClusters)
+}
+
+// Helper function to identify RMS clusters (similar to SpectralGroupingImprovements)
+private func identifyRMSClusters(_ sortedRMS: [Float]) -> [(min: Float, max: Float)] {
+    guard sortedRMS.count > 1 else { return [(sortedRMS.first ?? 0, sortedRMS.first ?? 0)] }
+    
+    // Calculate gaps between consecutive RMS values
+    var gaps: [(index: Int, gap: Float)] = []
+    for i in 1..<sortedRMS.count {
+        let gap = sortedRMS[i] - sortedRMS[i-1]
+        gaps.append((i, gap))
+    }
+    
+    // Find significant gaps
+    let sortedGaps = gaps.map { $0.gap }.sorted()
+    let medianGap = sortedGaps[sortedGaps.count / 2]
+    let mad = sortedGaps.map { abs($0 - medianGap) }.sorted()[sortedGaps.count / 2]
+    let threshold = medianGap + 2.5 * mad
+    
+    // Create clusters based on significant gaps
+    var clusters: [(min: Float, max: Float)] = []
+    var currentMin = sortedRMS[0]
+    
+    for gap in gaps {
+        if gap.gap > threshold {
+            clusters.append((currentMin, sortedRMS[gap.index - 1]))
+            currentMin = sortedRMS[gap.index]
+        }
+    }
+    clusters.append((currentMin, sortedRMS.last!))
+    
+    return clusters
+}
+
+// Helper to adjust RMS clusters to target count
+private func adjustRMSClusters(_ clusters: [(min: Float, max: Float)], targetCount: Int, rmsValues: [Float]) -> [(min: Float, max: Float)] {
+    var workingClusters = clusters
+    
+    while workingClusters.count < targetCount && workingClusters.count < rmsValues.count {
+        // Split the largest cluster
+        var largestIdx = 0
+        var largestRange: Float = 0
+        
+        for (i, cluster) in workingClusters.enumerated() {
+            let range = cluster.max - cluster.min
+            if range > largestRange {
+                largestRange = range
+                largestIdx = i
+            }
+        }
+        
+        let splitPoint = (workingClusters[largestIdx].min + workingClusters[largestIdx].max) / 2
+        let oldCluster = workingClusters[largestIdx]
+        workingClusters[largestIdx] = (oldCluster.min, splitPoint)
+        workingClusters.insert((splitPoint, oldCluster.max), at: largestIdx + 1)
+    }
+    
+    while workingClusters.count > targetCount && workingClusters.count > 1 {
+        // Merge the closest clusters
+        var mergeIdx = 0
+        var minGap = Float.greatestFiniteMagnitude
+        
+        for i in 0..<workingClusters.count - 1 {
+            let gap = workingClusters[i + 1].min - workingClusters[i].max
+            if gap < minGap {
+                minGap = gap
+                mergeIdx = i
+            }
+        }
+        
+        workingClusters[mergeIdx] = (workingClusters[mergeIdx].min, workingClusters[mergeIdx + 1].max)
+        workingClusters.remove(at: mergeIdx + 1)
+    }
+    
+    return workingClusters
+}
+
+// MARK: - PCA Whitening
+
+private func pcaWhitening(vectors: [[Float]]) -> [[Float]] {
+    guard !vectors.isEmpty, vectors.count > 1 else { return vectors }
+    
+    let n = vectors.count
+    let d = vectors[0].count
+    
+    // Calculate mean
+    var mean = [Float](repeating: 0, count: d)
+    for vector in vectors {
+        for i in 0..<d {
+            mean[i] += vector[i]
+        }
+    }
+    mean = mean.map { $0 / Float(n) }
+    
+    // Center the data
+    var centered = vectors
+    for i in 0..<n {
+        for j in 0..<d {
+            centered[i][j] -= mean[j]
+        }
+    }
+    
+    // Calculate covariance matrix (simplified - just diagonal scaling)
+    var variances = [Float](repeating: 0, count: d)
+    for vector in centered {
+        for i in 0..<d {
+            variances[i] += vector[i] * vector[i]
+        }
+    }
+    variances = variances.map { $0 / Float(n - 1) }
+    
+    // Apply whitening transform (simplified - just variance normalization)
+    var whitened = centered
+    for i in 0..<n {
+        for j in 0..<d {
+            let std = sqrt(max(variances[j], 1e-6))
+            whitened[i][j] /= std
+        }
+    }
+    
+    return whitened
+}
+
+// MARK: - Enhanced Auto-Grouping with Objective K Selection
+
+public func autoGroupEnhanced(
+    urls: [URL],
+    windowMs: Double = 256,
+    targetK: Int? = nil,
+    numRestarts: Int = 10
+) throws -> (groups: [[URL]], quality: ClusteringQuality, selectedK: Int) {
+    
+    // Extract enhanced features
+    let features = try urls.map { try extractEnhancedFeatures(from: $0, adaptiveWindow: true) }
+    
+    // Normalize features
+    let normalizedFeatures = normalizeEnhancedFeatures(features)
+    
+    // Create feature vectors
+    let vectors = normalizedFeatures.map { $0.featureVector }
+    
+    // Apply PCA whitening for better clustering
+    let whitenedVectors = pcaWhitening(vectors: vectors)
+    
+    // Determine K search range
+    let minK = targetK != nil ? max(2, targetK! - 1) : 2
+    let maxK = targetK != nil ? min(urls.count, targetK! + 2) : min(8, urls.count)
+    
+    var bestScore: Float = -Float.greatestFiniteMagnitude
+    var bestK = minK
+    var bestLabels: [Int] = []
+    var bestQuality = ClusteringQuality(silhouette: 0, daviesBouldin: nil, calinskiHarabasz: nil)
+    
+    // Try different K values
+    for k in minK...maxK {
+        var kBestScore: Float = -Float.greatestFiniteMagnitude
+        var kBestLabels: [Int] = []
+        
+        // Multiple restarts for each K
+        for restart in 0..<numRestarts {
+            let seed = k * 1000 + restart // Deterministic seed based on k and restart number
+            let (labels, centroids) = kMeansEnhanced(vectors: whitenedVectors, k: k, maxIters: 200, seed: seed)
+            
+            // Calculate quality metrics
+            let silhouette = calculateSilhouetteScore(vectors: whitenedVectors, labels: labels)
+            let dbi = calculateDaviesBouldinIndex(vectors: whitenedVectors, labels: labels, centroids: centroids)
+            let ch = calculateCalinskiHarabaszIndex(vectors: whitenedVectors, labels: labels, centroids: centroids)
+            
+            let quality = ClusteringQuality(silhouette: silhouette, daviesBouldin: dbi, calinskiHarabasz: ch)
+            let score = modelSelectionScore(quality, k: k, targetK: targetK, labels: labels)
+            
+            if score > kBestScore {
+                kBestScore = score
+                kBestLabels = labels
+            }
+        }
+        
+        if kBestScore > bestScore {
+            bestScore = kBestScore
+            bestK = k
+            bestLabels = kBestLabels
+            
+            // Recalculate quality for best clustering
+            let (_, centroids) = recalculateCentroids(vectors: whitenedVectors, labels: bestLabels)
+            let silhouette = calculateSilhouetteScore(vectors: whitenedVectors, labels: bestLabels)
+            let dbi = calculateDaviesBouldinIndex(vectors: whitenedVectors, labels: bestLabels, centroids: centroids)
+            let ch = calculateCalinskiHarabaszIndex(vectors: whitenedVectors, labels: bestLabels, centroids: centroids)
+            bestQuality = ClusteringQuality(silhouette: silhouette, daviesBouldin: dbi, calinskiHarabasz: ch)
+        }
+    }
+    
+    // K-calibration if target K is specified and different from best K
+    if let target = targetK, bestK != target {
+        bestLabels = calibrateToK(targetK: target, labels: bestLabels, vectors: whitenedVectors)
+        bestK = target
+        
+        // Recalculate quality after calibration
+        let (_, centroids) = recalculateCentroids(vectors: whitenedVectors, labels: bestLabels)
+        let silhouette = calculateSilhouetteScore(vectors: whitenedVectors, labels: bestLabels)
+        let dbi = calculateDaviesBouldinIndex(vectors: whitenedVectors, labels: bestLabels, centroids: centroids)
+        let ch = calculateCalinskiHarabaszIndex(vectors: whitenedVectors, labels: bestLabels, centroids: centroids)
+        bestQuality = ClusteringQuality(silhouette: silhouette, daviesBouldin: dbi, calinskiHarabasz: ch)
+    }
+    
+    // Group URLs by cluster
+    var groups: [[(url: URL, feat: EnhancedSampleFeatures, label: Int)]] = Array(repeating: [], count: bestK)
+    for (i, label) in bestLabels.enumerated() {
+        groups[label].append((urls[i], features[i], label))
+    }
+    
+    // Sort clusters by median RMS (quietest to loudest)
+    let sortedGroups = groups.sorted { 
+        medianValue($0.map { $0.feat.rms }) < medianValue($1.map { $0.feat.rms })
+    }
+    
+    // Within each cluster, sort by diversity
+    let result = sortedGroups.map { cluster in
+        let clusterIndices = cluster.map { item in
+            urls.firstIndex(of: item.url)!
+        }
+        let clusterVectors = clusterIndices.map { whitenedVectors[$0] }
+        let sortedIndices = sortByDiversityEnhanced(vectors: clusterVectors)
+        return sortedIndices.map { cluster[$0].url }
+    }
+    
+    // Margin recheck - reassign ambiguous samples
+    bestLabels = marginRecheckReassignment(vectors: whitenedVectors, labels: bestLabels, centroids: recalculateCentroids(vectors: whitenedVectors, labels: bestLabels).1)
+    
+    // Final regrouping after margin recheck
+    groups = Array(repeating: [], count: bestK)
+    for (i, label) in bestLabels.enumerated() {
+        groups[label].append((urls[i], features[i], label))
+    }
+    
+    let finalSortedGroups = groups.sorted { 
+        medianValue($0.map { $0.feat.rms }) < medianValue($1.map { $0.feat.rms })
+    }
+    
+    let finalResult = finalSortedGroups.map { cluster in
+        let clusterIndices = cluster.map { item in
+            urls.firstIndex(of: item.url)!
+        }
+        let clusterVectors = clusterIndices.map { whitenedVectors[$0] }
+        let sortedIndices = sortByDiversityEnhanced(vectors: clusterVectors)
+        return sortedIndices.map { cluster[$0].url }
+    }
+    
+    return (finalResult, bestQuality, bestK)
+}
+
+// MARK: - Margin-based Reassignment
+
+private func marginRecheckReassignment(vectors: [[Float]], labels: [Int], centroids: [[Float]], marginThreshold: Float = 1.2) -> [Int] {
+    var newLabels = labels
+    
+    // First pass: identify ambiguous samples
+    var ambiguousSamples: [(index: Int, margin: Float, currentCluster: Int, closestCluster: Int)] = []
+    
+    for (i, vector) in vectors.enumerated() {
+        // Calculate distances to all centroids
+        var distances: [(cluster: Int, distance: Float)] = []
+        for (j, centroid) in centroids.enumerated() {
+            distances.append((j, euclideanDistance(vector, centroid)))
+        }
+        
+        // Sort by distance
+        distances.sort { $0.distance < $1.distance }
+        
+        if distances.count >= 2 {
+            let d1 = distances[0].distance
+            let d2 = distances[1].distance
+            let margin = d2 / max(d1, 0.0001)
+            
+            // If margin is small (ambiguous assignment)
+            if margin < marginThreshold {
+                let currentCluster = labels[i]
+                let closestCluster = distances[0].cluster
+                
+                if currentCluster != closestCluster {
+                    ambiguousSamples.append((i, margin, currentCluster, closestCluster))
+                }
+            }
+        }
+    }
+    
+    // Sort ambiguous samples by margin (most ambiguous first)
+    ambiguousSamples.sort { $0.margin < $1.margin }
+    
+    // Second pass: try to reassign ambiguous samples to optimize model selection score
+    for sample in ambiguousSamples {
+        let i = sample.index
+        let currentCluster = newLabels[i]
+        let proposedCluster = sample.closestCluster
+        
+        // Calculate current model selection score
+        let (_, currentCentroids) = recalculateCentroids(vectors: vectors, labels: newLabels)
+        let currentSilhouette = calculateSilhouetteScore(vectors: vectors, labels: newLabels)
+        let currentDBI = calculateDaviesBouldinIndex(vectors: vectors, labels: newLabels, centroids: currentCentroids)
+        let currentCH = calculateCalinskiHarabaszIndex(vectors: vectors, labels: newLabels, centroids: currentCentroids)
+        let currentQuality = ClusteringQuality(silhouette: currentSilhouette, daviesBouldin: currentDBI, calinskiHarabasz: currentCH)
+        let currentScore = modelSelectionScore(currentQuality, k: currentCentroids.count, labels: newLabels)
+        
+        // Try reassignment
+        var testLabels = newLabels
+        testLabels[i] = proposedCluster
+        
+        // Calculate new model selection score
+        let (_, testCentroids) = recalculateCentroids(vectors: vectors, labels: testLabels)
+        let testSilhouette = calculateSilhouetteScore(vectors: vectors, labels: testLabels)
+        let testDBI = calculateDaviesBouldinIndex(vectors: vectors, labels: testLabels, centroids: testCentroids)
+        let testCH = calculateCalinskiHarabaszIndex(vectors: vectors, labels: testLabels, centroids: testCentroids)
+        let testQuality = ClusteringQuality(silhouette: testSilhouette, daviesBouldin: testDBI, calinskiHarabasz: testCH)
+        let testScore = modelSelectionScore(testQuality, k: testCentroids.count, labels: testLabels)
+        
+        // Accept reassignment if it improves overall model selection score
+        if testScore > currentScore {
+            newLabels[i] = proposedCluster
+        }
+    }
+    
+    return newLabels
+}
+
+private func calculateLocalSilhouette(vector: [Float], cluster: Int, vectors: [[Float]], labels: [Int]) -> Float {
+    // Calculate a(i) - average distance to points in same cluster
+    let sameCluster = vectors.enumerated().filter { labels[$0.offset] == cluster && $0.offset != vectors.firstIndex(where: { $0 == vector }) }
+    let a = sameCluster.isEmpty ? 0 : sameCluster.map { euclideanDistance(vector, $0.element) }.reduce(0, +) / Float(sameCluster.count)
+    
+    // Calculate b(i) - minimum average distance to points in other clusters
+    var b = Float.greatestFiniteMagnitude
+    let otherClusters = Set(labels).filter { $0 != cluster }
+    
+    for otherCluster in otherClusters {
+        let otherPoints = vectors.enumerated().filter { labels[$0.offset] == otherCluster }
+        if !otherPoints.isEmpty {
+            let avgDist = otherPoints.map { euclideanDistance(vector, $0.element) }.reduce(0, +) / Float(otherPoints.count)
+            b = min(b, avgDist)
+        }
+    }
+    
+    return (b - a) / max(a, b)
+}
+
 // MARK: - Improved Clustering Algorithm
 
 public func optimizedGroupSamples(
@@ -454,7 +935,9 @@ public func optimizedGroupSamples(
     case .kMeans:
         (labels, _) = kMeansEnhanced(vectors: vectors, k: optimalK, maxIters: 200)
     case .hierarchical:
-        labels = hierarchicalClustering(vectors: vectors, k: optimalK)
+        // Use Ward linkage for small datasets (<= 30 samples)
+        let linkage = urls.count <= 30 ? "ward" : "average"
+        labels = hierarchicalClustering(vectors: vectors, k: optimalK, linkage: linkage)
     case .dbscan:
         labels = dbscanClustering(vectors: vectors, eps: 0.5, minPts: 2)
     }
@@ -482,9 +965,9 @@ public func optimizedGroupSamples(
 
 // MARK: - Enhanced Clustering Methods
 
-private func kMeansEnhanced(vectors: [[Float]], k: Int, maxIters: Int) -> (labels: [Int], centroids: [[Float]]) {
+private func kMeansEnhanced(vectors: [[Float]], k: Int, maxIters: Int, seed: Int? = nil) -> (labels: [Int], centroids: [[Float]]) {
     // Use k-means++ initialization for better starting centroids
-    var centroids = kMeansPlusPlusInit(vectors: vectors, k: k)
+    var centroids = kMeansPlusPlusInit(vectors: vectors, k: k, seed: seed)
     var labels = [Int](repeating: 0, count: vectors.count)
     
     for iteration in 0..<maxIters {
@@ -523,12 +1006,14 @@ private func kMeansEnhanced(vectors: [[Float]], k: Int, maxIters: Int) -> (label
     return (labels, centroids)
 }
 
-private func hierarchicalClustering(vectors: [[Float]], k: Int) -> [Int] {
-    // Simplified hierarchical clustering using average linkage
+private func hierarchicalClustering(vectors: [[Float]], k: Int, linkage: String = "ward") -> [Int] {
     var clusters: [[Int]] = (0..<vectors.count).map { [$0] }
     var labels = Array(0..<vectors.count)
     
-    // Build distance matrix
+    // Calculate cluster centroids for Ward linkage
+    var centroids: [[Float]] = vectors
+    
+    // Build initial distance matrix for single points
     var distances: [[Float]] = Array(repeating: Array(repeating: Float.greatestFiniteMagnitude, count: vectors.count), count: vectors.count)
     
     for i in 0..<vectors.count {
@@ -549,9 +1034,18 @@ private func hierarchicalClustering(vectors: [[Float]], k: Int) -> [Int] {
         // Find closest clusters
         for i in 0..<clusters.count {
             for j in i+1..<clusters.count {
-                let avgDist = averageClusterDistance(clusters[i], clusters[j], distances: distances)
-                if avgDist < minDist {
-                    minDist = avgDist
+                let dist: Float
+                
+                if linkage == "ward" {
+                    // Ward linkage minimizes within-cluster variance
+                    dist = wardDistance(clusters[i], clusters[j], vectors: vectors, centroids: centroids)
+                } else {
+                    // Average linkage
+                    dist = averageClusterDistance(clusters[i], clusters[j], distances: distances)
+                }
+                
+                if dist < minDist {
+                    minDist = dist
                     mergeI = i
                     mergeJ = j
                 }
@@ -559,8 +1053,16 @@ private func hierarchicalClustering(vectors: [[Float]], k: Int) -> [Int] {
         }
         
         // Merge clusters
-        clusters[mergeI] += clusters[mergeJ]
+        let newCluster = clusters[mergeI] + clusters[mergeJ]
+        clusters[mergeI] = newCluster
         clusters.remove(at: mergeJ)
+        
+        // Update centroid for merged cluster (for Ward linkage)
+        if linkage == "ward" {
+            let clusterVectors = newCluster.map { vectors[$0] }
+            centroids[mergeI] = calculateCentroid(clusterVectors)
+            centroids.remove(at: mergeJ)
+        }
         
         // Update labels
         for (clusterIdx, cluster) in clusters.enumerated() {
@@ -571,6 +1073,37 @@ private func hierarchicalClustering(vectors: [[Float]], k: Int) -> [Int] {
     }
     
     return labels
+}
+
+// Ward distance calculation
+private func wardDistance(_ cluster1: [Int], _ cluster2: [Int], vectors: [[Float]], centroids: [[Float]]) -> Float {
+    let n1 = Float(cluster1.count)
+    let n2 = Float(cluster2.count)
+    
+    // Calculate merged cluster centroid
+    let cluster1Vectors = cluster1.map { vectors[$0] }
+    let cluster2Vectors = cluster2.map { vectors[$0] }
+    let mergedVectors = cluster1Vectors + cluster2Vectors
+    let mergedCentroid = calculateCentroid(mergedVectors)
+    
+    // Calculate increase in within-cluster sum of squares
+    var wcss1: Float = 0
+    for vec in cluster1Vectors {
+        wcss1 += pow(euclideanDistance(vec, centroids[0]), 2)
+    }
+    
+    var wcss2: Float = 0
+    for vec in cluster2Vectors {
+        wcss2 += pow(euclideanDistance(vec, centroids[1]), 2)
+    }
+    
+    var wcssMerged: Float = 0
+    for vec in mergedVectors {
+        wcssMerged += pow(euclideanDistance(vec, mergedCentroid), 2)
+    }
+    
+    // Ward criterion: minimize increase in within-cluster variance
+    return wcssMerged - wcss1 - wcss2
 }
 
 private func dbscanClustering(vectors: [[Float]], eps: Float, minPts: Int) -> [Int] {
@@ -649,9 +1182,21 @@ private func determineOptimalClustersEnhanced(vectors: [[Float]], minK: Int, max
 
 private func calculateSilhouetteScore(vectors: [[Float]], labels: [Int]) -> Float {
     var totalScore: Float = 0
+    var clusterSizes: [Int: Int] = [:]
+    
+    // Count cluster sizes
+    for label in labels {
+        clusterSizes[label, default: 0] += 1
+    }
     
     for (i, vector) in vectors.enumerated() {
         let cluster = labels[i]
+        
+        // Treat singleton clusters as having silhouette score of 0
+        if clusterSizes[cluster, default: 0] == 1 {
+            totalScore += 0
+            continue
+        }
         
         // Calculate a(i) - average distance to points in same cluster
         let sameCluster = vectors.enumerated().filter { labels[$0.offset] == cluster && $0.offset != i }
@@ -677,6 +1222,276 @@ private func calculateSilhouetteScore(vectors: [[Float]], labels: [Int]) -> Floa
     return totalScore / Float(vectors.count)
 }
 
+private func calculateDaviesBouldinIndex(vectors: [[Float]], labels: [Int], centroids: [[Float]]) -> Float? {
+    let k = centroids.count
+    guard k > 1 else { return nil }
+    
+    // Calculate average distance within each cluster
+    var avgDistances = [Float](repeating: 0, count: k)
+    var clusterCounts = [Int](repeating: 0, count: k)
+    
+    for (i, vector) in vectors.enumerated() {
+        let cluster = labels[i]
+        avgDistances[cluster] += euclideanDistance(vector, centroids[cluster])
+        clusterCounts[cluster] += 1
+    }
+    
+    for i in 0..<k {
+        if clusterCounts[i] > 0 {
+            avgDistances[i] /= Float(clusterCounts[i])
+        }
+    }
+    
+    // Calculate Davies-Bouldin index
+    var dbIndex: Float = 0
+    
+    for i in 0..<k {
+        var maxRatio: Float = 0
+        
+        for j in 0..<k where j != i {
+            let centroidDist = euclideanDistance(centroids[i], centroids[j])
+            if centroidDist > 0 {
+                let ratio = (avgDistances[i] + avgDistances[j]) / centroidDist
+                maxRatio = max(maxRatio, ratio)
+            }
+        }
+        
+        dbIndex += maxRatio
+    }
+    
+    return dbIndex / Float(k)
+}
+
+private func calculateCalinskiHarabaszIndex(vectors: [[Float]], labels: [Int], centroids: [[Float]]) -> Float? {
+    let n = vectors.count
+    let k = centroids.count
+    guard k > 1 && n > k else { return nil }
+    
+    // Calculate overall centroid
+    var overallCentroid = [Float](repeating: 0, count: vectors[0].count)
+    for vector in vectors {
+        for (i, val) in vector.enumerated() {
+            overallCentroid[i] += val
+        }
+    }
+    overallCentroid = overallCentroid.map { $0 / Float(n) }
+    
+    // Between-cluster scatter
+    var betweenScatter: Float = 0
+    var clusterCounts = [Int](repeating: 0, count: k)
+    
+    for label in labels {
+        clusterCounts[label] += 1
+    }
+    
+    for (i, centroid) in centroids.enumerated() {
+        let dist = euclideanDistance(centroid, overallCentroid)
+        betweenScatter += Float(clusterCounts[i]) * dist * dist
+    }
+    
+    // Within-cluster scatter
+    var withinScatter: Float = 0
+    for (i, vector) in vectors.enumerated() {
+        let cluster = labels[i]
+        let dist = euclideanDistance(vector, centroids[cluster])
+        withinScatter += dist * dist
+    }
+    
+    return (betweenScatter / Float(k - 1)) / (withinScatter / Float(n - k))
+}
+
+private func recalculateCentroids(vectors: [[Float]], labels: [Int]) -> ([Int], [[Float]]) {
+    let k = (labels.max() ?? 0) + 1
+    var centroids = Array(repeating: [Float](repeating: 0, count: vectors[0].count), count: k)
+    var counts = [Int](repeating: 0, count: k)
+    
+    for (i, vector) in vectors.enumerated() {
+        let cluster = labels[i]
+        for (j, val) in vector.enumerated() {
+            centroids[cluster][j] += val
+        }
+        counts[cluster] += 1
+    }
+    
+    for i in 0..<k {
+        if counts[i] > 0 {
+            centroids[i] = centroids[i].map { $0 / Float(counts[i]) }
+        }
+    }
+    
+    return (labels, centroids)
+}
+
+// MARK: - K-Calibration
+
+private func calibrateToK(targetK: Int, labels: [Int], vectors: [[Float]]) -> [Int] {
+    var workingLabels = labels
+    var currentK = Set(labels).count
+    
+    while currentK != targetK {
+        if currentK < targetK {
+            workingLabels = splitWorstCluster(labels: workingLabels, vectors: vectors)
+        } else {
+            workingLabels = mergeClosestClusters(labels: workingLabels, vectors: vectors)
+        }
+        currentK = Set(workingLabels).count
+    }
+    
+    return workingLabels
+}
+
+private func splitWorstCluster(labels: [Int], vectors: [[Float]]) -> [Int] {
+    // Calculate per-cluster metrics
+    var clusterMetrics: [(cluster: Int, size: Int, score: Float, intraVariance: Float)] = []
+    let clusters = Set(labels)
+    
+    for cluster in clusters {
+        let clusterIndices = labels.enumerated().filter { $0.element == cluster }.map { $0.offset }
+        let size = clusterIndices.count
+        
+        if size > 1 {
+            // Calculate silhouette score (treating singletons as 0)
+            var totalScore: Float = 0
+            for idx in clusterIndices {
+                let vector = vectors[idx]
+                
+                // Average distance within cluster
+                let sameCluster = clusterIndices.filter { $0 != idx }
+                let a = sameCluster.map { euclideanDistance(vector, vectors[$0]) }.reduce(0, +) / Float(sameCluster.count)
+                
+                // Minimum average distance to other clusters
+                var b = Float.greatestFiniteMagnitude
+                for otherCluster in clusters where otherCluster != cluster {
+                    let otherIndices = labels.enumerated().filter { $0.element == otherCluster }.map { $0.offset }
+                    if !otherIndices.isEmpty {
+                        let avgDist = otherIndices.map { euclideanDistance(vector, vectors[$0]) }.reduce(0, +) / Float(otherIndices.count)
+                        b = min(b, avgDist)
+                    }
+                }
+                
+                totalScore += (b - a) / max(a, b)
+            }
+            let avgScore = totalScore / Float(size)
+            
+            // Calculate intra-cluster variance
+            let clusterVectors = clusterIndices.map { vectors[$0] }
+            let centroid = calculateCentroid(clusterVectors)
+            var variance: Float = 0
+            for vec in clusterVectors {
+                variance += pow(euclideanDistance(vec, centroid), 2)
+            }
+            variance /= Float(size)
+            
+            clusterMetrics.append((cluster, size, avgScore, variance))
+        } else {
+            // Singleton cluster - don't split
+            clusterMetrics.append((cluster, size, 0, 0))
+        }
+    }
+    
+    // Prioritize splitting:
+    // 1. Large clusters with low silhouette scores
+    // 2. Clusters with high internal variance
+    clusterMetrics.sort { lhs, rhs in
+        // Don't split singletons
+        if lhs.size <= 1 { return false }
+        if rhs.size <= 1 { return true }
+        
+        // Prefer splitting larger clusters with lower scores
+        let lhsPriority = Float(lhs.size) * (1 - lhs.score) + lhs.intraVariance
+        let rhsPriority = Float(rhs.size) * (1 - rhs.score) + rhs.intraVariance
+        return lhsPriority > rhsPriority
+    }
+    
+    // Split the highest priority cluster
+    guard let targetCluster = clusterMetrics.first, targetCluster.size > 1 else { return labels }
+    
+    let clusterIndices = labels.enumerated().filter { $0.element == targetCluster.cluster }.map { $0.offset }
+    let clusterVectors = clusterIndices.map { vectors[$0] }
+    
+    // Run k-means with k=2 on this cluster
+    let (subLabels, _) = kMeansEnhanced(vectors: clusterVectors, k: 2, maxIters: 50)
+    
+    // Assign new labels
+    var newLabels = labels
+    let newClusterLabel = (labels.max() ?? 0) + 1
+    
+    for (i, idx) in clusterIndices.enumerated() {
+        if subLabels[i] == 1 {
+            newLabels[idx] = newClusterLabel
+        }
+    }
+    
+    return newLabels
+}
+
+private func mergeClosestClusters(labels: [Int], vectors: [[Float]]) -> [Int] {
+    let (_, centroids) = recalculateCentroids(vectors: vectors, labels: labels)
+    let clusters = Array(Set(labels))
+    
+    guard clusters.count > 1 else { return labels }
+    
+    // Count cluster sizes
+    var clusterSizes: [Int: Int] = [:]
+    for label in labels {
+        clusterSizes[label, default: 0] += 1
+    }
+    
+    // Identify singleton clusters
+    let singletons = clusters.filter { clusterSizes[$0, default: 0] == 1 }
+    
+    var mergeA = -1
+    var mergeB = -1
+    var minDist = Float.greatestFiniteMagnitude
+    
+    if !singletons.isEmpty {
+        // Priority 1: Merge singleton with its nearest cluster
+        for singleton in singletons {
+            let singletonIdx = clusters.firstIndex(of: singleton)!
+            
+            for (j, cluster) in clusters.enumerated() {
+                if j != singletonIdx {
+                    let dist = euclideanDistance(centroids[singletonIdx], centroids[j])
+                    if dist < minDist {
+                        minDist = dist
+                        mergeA = cluster
+                        mergeB = singleton
+                    }
+                }
+            }
+        }
+    } else {
+        // Priority 2: Merge closest pair of clusters
+        for i in 0..<clusters.count {
+            for j in (i+1)..<clusters.count {
+                let dist = euclideanDistance(centroids[i], centroids[j])
+                
+                // Prefer merging smaller clusters
+                let sizeA = clusterSizes[clusters[i], default: 0]
+                let sizeB = clusterSizes[clusters[j], default: 0]
+                let sizeWeight = 1.0 + 0.1 / Float(min(sizeA, sizeB))
+                let weightedDist = dist / sizeWeight
+                
+                if weightedDist < minDist {
+                    minDist = weightedDist
+                    mergeA = clusters[i]
+                    mergeB = clusters[j]
+                }
+            }
+        }
+    }
+    
+    // Merge clusters
+    var newLabels = labels
+    for i in 0..<labels.count {
+        if labels[i] == mergeB {
+            newLabels[i] = mergeA
+        }
+    }
+    
+    return newLabels
+}
+
 // MARK: - Distance Functions
 
 private func euclideanDistance(_ a: [Float], _ b: [Float]) -> Float {
@@ -699,11 +1514,18 @@ private func cosineDistance(_ a: [Float], _ b: [Float]) -> Float {
 
 // MARK: - Clustering Helpers
 
-private func kMeansPlusPlusInit(vectors: [[Float]], k: Int) -> [[Float]] {
+private func kMeansPlusPlusInit(vectors: [[Float]], k: Int, seed: Int? = nil) -> [[Float]] {
     var centroids: [[Float]] = []
     
-    // Choose first centroid randomly
-    centroids.append(vectors.randomElement()!)
+    // Use deterministic random if seed provided
+    var rng = seed != nil ? SystemRandomNumberGenerator() : SystemRandomNumberGenerator()
+    if let s = seed {
+        // Simple deterministic selection based on seed
+        let firstIdx = abs(s) % vectors.count
+        centroids.append(vectors[firstIdx])
+    } else {
+        centroids.append(vectors.randomElement()!)
+    }
     
     // Choose remaining centroids
     for _ in 1..<k {

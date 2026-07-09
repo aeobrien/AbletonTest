@@ -136,7 +136,15 @@ struct AmplitudeGroupSuggestionView: View {
                         
                         if isTestingMode && testSession != nil {
                             Button("Export Analysis") {
+                                print("=== EXPORT BUTTON CLICKED ===")
+                                print("testSession is nil: \(testSession == nil)")
+                                if let session = testSession {
+                                    print("Session ID: \(session.id)")
+                                    print("Sample count: \(session.sampleCount)")
+                                    print("Has comparison metrics: \(session.comparisonMetrics != nil)")
+                                }
                                 showingExportDialog = true
+                                print("Set showingExportDialog to true")
                             }
                             .buttonStyle(.bordered)
                         }
@@ -169,15 +177,53 @@ struct AmplitudeGroupSuggestionView: View {
             contentType: .json,
             defaultFilename: "spectral_grouping_analysis_\(Date().timeIntervalSince1970).json"
         ) { result in
+            print("=== FILE EXPORT RESULT ===")
+            print("showingExportDialog: \(showingExportDialog)")
+            print("testSession is nil: \(testSession == nil)")
+            
+            if let session = testSession {
+                print("Session ID: \(session.id)")
+                print("Sample count: \(session.sampleCount)")
+                print("Manual grouping count: \(session.manualGrouping.count)")
+                print("Auto grouping count: \(session.automaticGrouping.count)")
+            }
+            
             switch result {
             case .success(let url):
-                print("Analysis exported to: \(url)")
+                print("SUCCESS: File should be exported to: \(url)")
+                print("URL path: \(url.path)")
+                print("URL is file URL: \(url.isFileURL)")
+                
+                // Check if file exists
+                let fileExists = FileManager.default.fileExists(atPath: url.path)
+                print("File exists at path: \(fileExists)")
+                
                 if let session = testSession {
+                    print("Printing detailed analysis...")
                     analyzer.printDetailedAnalysis(session)
+                } else {
+                    print("WARNING: testSession is nil after successful export")
                 }
+                
             case .failure(let error):
-                print("Export failed: \(error)")
+                print("FAILURE: Export failed")
+                print("Error type: \(type(of: error))")
+                print("Error description: \(error)")
+                print("Error localized: \(error.localizedDescription)")
+                
+                if let nsError = error as NSError? {
+                    print("NSError domain: \(nsError.domain)")
+                    print("NSError code: \(nsError.code)")
+                    print("NSError userInfo: \(nsError.userInfo)")
+                }
+                
+                // Check if it's a specific type of error
+                if let cocoaError = error as? CocoaError {
+                    print("CocoaError code: \(cocoaError.code)")
+                    print("CocoaError specific: \(cocoaError)")
+                }
             }
+            print("=== END FILE EXPORT RESULT ===")
         }
     }
     
@@ -409,34 +455,33 @@ struct AmplitudeGroupSuggestionView: View {
         
         // Run analysis with comparison
         Task {
-            // Run automatic grouping (which includes analysis)
-            let (autoGrouping, analysisData) = await analyzer.runAutomaticGrouping(
-                markers: audioViewModel.markers,
-                audioViewModel: audioViewModel,
-                windowMs: windowLengthMs
-            )
-            
-            // Convert groupings to string IDs
+            // Convert manual grouping to string IDs for the analyzer
             var manualStringGrouping: [Int: [String]] = [:]
             for (group, markers) in manualGrouping {
                 manualStringGrouping[group] = markers.map { $0.id.uuidString }
             }
             
-            // Compare groupings
-            let metrics = analyzer.compareGroupings(
-                manual: manualStringGrouping,
-                automatic: autoGrouping,
-                analysisData: analysisData
+            // Set manual grouping for K-calibration
+            await analyzer.setManualGrouping(manualStringGrouping)
+            
+            // Run enhanced automatic grouping with diagnostics
+            let (autoGrouping, analysisData, diagnostics) = await analyzer.runAutomaticGroupingWithDiagnostics(
+                markers: audioViewModel.markers,
+                audioViewModel: audioViewModel,
+                windowMs: windowLengthMs,
+                enableCalibration: true,
+                enableRebalance: true
             )
             
-            // Create test session
+            // Create test session with comprehensive diagnostics
             let session = GroupingTestSession(
                 windowLengthMs: windowLengthMs,
                 sampleCount: audioViewModel.markers.count,
                 samples: analysisData,
                 manualGrouping: manualStringGrouping,
                 automaticGrouping: autoGrouping,
-                comparisonMetrics: metrics
+                comparisonMetrics: diagnostics?.comparisonMetrics,
+                comprehensiveDiagnostics: diagnostics
             )
             
             // Convert automatic grouping back to markers

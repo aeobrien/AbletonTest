@@ -6,7 +6,9 @@ import Accelerate
 
 // Compute the end sample of the region starting at `marker`
 private func endOfRegion(after marker: Marker, markers: [Marker], totalSamples: Int) -> Int {
-    if let custom = marker.customEndPosition { return custom }
+    if let custom = marker.customEndPosition { 
+        return min(custom, totalSamples - 1)  // Ensure we don't exceed bounds
+    }
     let sorted = markers.sorted { $0.samplePosition < $1.samplePosition }
     if let idx = sorted.firstIndex(where: { $0.id == marker.id }), idx < sorted.count - 1 {
         return sorted[idx + 1].samplePosition
@@ -380,7 +382,9 @@ final class EnhancedAudioViewModel: ObservableObject {
     
     func xPosition(for sampleIndex: Int, in width: CGFloat) -> CGFloat {
         guard visibleLength > 0 else { return 0 }
-        let relativeSample = sampleIndex - visibleStart
+        // Clamp sample index to valid range
+        let clampedIndex = max(0, min(sampleIndex, totalSamples - 1))
+        let relativeSample = clampedIndex - visibleStart
         let normalizedPosition = Double(relativeSample) / Double(visibleLength)
         return CGFloat(normalizedPosition) * width
     }
@@ -469,6 +473,7 @@ final class EnhancedAudioViewModel: ObservableObject {
             
             var sum: Float = 0
             for j in windowStart..<windowEnd {
+                if j >= buffer.count { break }
                 let sample = buffer.samples[j]
                 sum += sample * sample
             }
@@ -1835,18 +1840,30 @@ final class EnhancedAudioViewModel: ObservableObject {
             
             print("Analyzing region \(index): \(startPos) to \(nextMarkerPos)")
             
+            // Skip regions that are too short to analyze
+            if nextMarkerPos <= startPos + Int(sampleRate * 0.01) { // Less than 10ms
+                print("Region too short to analyze, skipping")
+                continue
+            }
+            
             // First, analyze the noise floor by looking at the last portion of the region
             let noiseFloorStart = max(startPos + Int(sampleRate * 0.5), nextMarkerPos - Int(sampleRate * 0.2))
             var noiseFloorSum: Float = 0
             var noiseFloorCount = 0
             var noiseFloorMax: Float = 0
             
-            for i in noiseFloorStart..<nextMarkerPos {
-                if i >= buffer.count { break }
-                let amplitude = abs(buffer.samples[i])
-                noiseFloorSum += amplitude
-                noiseFloorMax = max(noiseFloorMax, amplitude)
-                noiseFloorCount += 1
+            // Ensure valid range - if region is too short, analyze what we have
+            let validNoiseFloorStart = min(noiseFloorStart, nextMarkerPos - 1)
+            let validNoiseFloorEnd = nextMarkerPos
+            
+            if validNoiseFloorStart < validNoiseFloorEnd {
+                for i in validNoiseFloorStart..<validNoiseFloorEnd {
+                    if i >= buffer.count { break }
+                    let amplitude = abs(buffer.samples[i])
+                    noiseFloorSum += amplitude
+                    noiseFloorMax = max(noiseFloorMax, amplitude)
+                    noiseFloorCount += 1
+                }
             }
             
             let avgNoiseFloor = noiseFloorCount > 0 ? noiseFloorSum / Float(noiseFloorCount) : 0.0001
@@ -1922,7 +1939,9 @@ final class EnhancedAudioViewModel: ObservableObject {
                 var maxGradient: Float = 0
                 
                 let gradientWindow = Int(sampleRate * 0.01) // 10ms
-                for i in startPos + gradientWindow..<min(startPos + Int(sampleRate * 0.5), nextMarkerPos - gradientWindow) {
+                let gradientEnd = min(startPos + Int(sampleRate * 0.5), nextMarkerPos - gradientWindow)
+                for i in startPos + gradientWindow..<gradientEnd {
+                    if i - gradientWindow < 0 || i + gradientWindow >= buffer.count { continue }
                     let before = abs(buffer.samples[i - gradientWindow])
                     let after = abs(buffer.samples[i + gradientWindow])
                     let gradient = before - after

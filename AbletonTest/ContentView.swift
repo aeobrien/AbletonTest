@@ -8,11 +8,14 @@ struct ContentView: View {
     @StateObject private var audioViewModel = EnhancedAudioViewModel()
     @StateObject private var samplerViewModel = SamplerViewModel()
     @StateObject private var midiManager = MIDIManager()
+    @EnvironmentObject var projectFileManager: ProjectFileManager
     
     @State private var showingBatchImport = false
     @State private var showingExportXML = false
     @State private var batchImportURLs: [URL] = []
     @State private var selectedTab = 0
+    @State private var showingSaveError = false
+    @State private var saveErrorMessage = ""
     
     // Velocity mapping states
     @State private var selectedGroups: Set<Int> = []
@@ -85,6 +88,9 @@ struct ContentView: View {
         .onAppear {
             // Link the audio view model to the sampler view model
             samplerViewModel.audioViewModel = audioViewModel
+            
+            // Set up notification observers
+            setupNotificationObservers()
         }
         .background(
             // Hidden buttons for keyboard shortcuts
@@ -177,6 +183,11 @@ struct ContentView: View {
             if let xmlContent = generatePreviewXML() {
                 ExportXMLView(xmlContent: xmlContent)
             }
+        }
+        .alert("Save Error", isPresented: $showingSaveError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(saveErrorMessage)
         }
     }
 
@@ -1453,6 +1464,85 @@ struct ContentView: View {
         let projectPath = FileManager.default.temporaryDirectory.path
         return samplerViewModel.generateFullXmlString(projectPath: projectPath)
     }
+    
+    // MARK: - Project File Management
+    
+    private func setupNotificationObservers() {
+        NotificationCenter.default.addObserver(forName: .saveProject, object: nil, queue: .main) { _ in
+            saveProject()
+        }
+        
+        NotificationCenter.default.addObserver(forName: .saveProjectAs, object: nil, queue: .main) { _ in
+            saveProjectAs()
+        }
+        
+        NotificationCenter.default.addObserver(forName: .openProject, object: nil, queue: .main) { _ in
+            openProject()
+        }
+        
+        NotificationCenter.default.addObserver(forName: .exportADV, object: nil, queue: .main) { _ in
+            samplerViewModel.saveToADVFile()
+        }
+        
+        NotificationCenter.default.addObserver(forName: .exportADG, object: nil, queue: .main) { _ in
+            samplerViewModel.saveToADGFile()
+        }
+    }
+    
+    private func saveProject() {
+        if let currentURL = projectFileManager.currentProjectURL {
+            // Save to existing file
+            do {
+                try projectFileManager.saveProject(audioViewModel: audioViewModel, samplerViewModel: samplerViewModel, to: currentURL)
+            } catch {
+                saveErrorMessage = error.localizedDescription
+                showingSaveError = true
+            }
+        } else {
+            // No current file, show save panel
+            saveProjectAs()
+        }
+    }
+    
+    private func saveProjectAs() {
+        let savePanel = NSSavePanel()
+        savePanel.allowedContentTypes = [UTType(filenameExtension: "atp")!] // AbletonTest Project
+        savePanel.nameFieldStringValue = "Untitled.atp"
+        savePanel.title = "Save Project"
+        savePanel.message = "Choose where to save your project file"
+        
+        savePanel.begin { response in
+            if response == .OK, let url = savePanel.url {
+                do {
+                    try projectFileManager.saveProject(audioViewModel: audioViewModel, samplerViewModel: samplerViewModel, to: url)
+                } catch {
+                    saveErrorMessage = error.localizedDescription
+                    showingSaveError = true
+                }
+            }
+        }
+    }
+    
+    private func openProject() {
+        let openPanel = NSOpenPanel()
+        openPanel.allowedContentTypes = [UTType(filenameExtension: "atp")!]
+        openPanel.allowsMultipleSelection = false
+        openPanel.canChooseDirectories = false
+        openPanel.canChooseFiles = true
+        openPanel.title = "Open Project"
+        openPanel.message = "Select a project file to open"
+        
+        openPanel.begin { response in
+            if response == .OK, let url = openPanel.url {
+                do {
+                    try projectFileManager.loadProject(from: url, audioViewModel: audioViewModel, samplerViewModel: samplerViewModel)
+                } catch {
+                    saveErrorMessage = error.localizedDescription
+                    showingSaveError = true
+                }
+            }
+        }
+    }
 }
 
 
@@ -1767,12 +1857,66 @@ struct RegionEndHandle: View {
 
 @main
 struct AbletonTestApp: App {
+    @StateObject private var projectFileManager = ProjectFileManager.shared
+    
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .frame(minWidth: 800, minHeight: 600)
+                .environmentObject(projectFileManager)
         }
         .windowStyle(.automatic)
         .windowToolbarStyle(.automatic)
+        .commands {
+            CommandGroup(replacing: .newItem) {
+                Button("New Project") {
+                    // Clear current project
+                    projectFileManager.currentProjectURL = nil
+                    projectFileManager.hasUnsavedChanges = false
+                }
+                .keyboardShortcut("n", modifiers: [.command])
+            }
+            
+            CommandGroup(replacing: .saveItem) {
+                Button("Save Project") {
+                    NotificationCenter.default.post(name: .saveProject, object: nil)
+                }
+                .keyboardShortcut("s", modifiers: [.command])
+                
+                Button("Save Project As...") {
+                    NotificationCenter.default.post(name: .saveProjectAs, object: nil)
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+            }
+            
+            CommandGroup(after: .saveItem) {
+                Divider()
+                
+                Button("Open Project...") {
+                    NotificationCenter.default.post(name: .openProject, object: nil)
+                }
+                .keyboardShortcut("o", modifiers: [.command])
+                
+                Divider()
+                
+                Button("Export ADV...") {
+                    NotificationCenter.default.post(name: .exportADV, object: nil)
+                }
+                
+                Button("Export ADG...") {
+                    NotificationCenter.default.post(name: .exportADG, object: nil)
+                }
+            }
+        }
     }
+}
+
+// MARK: - Notification Names
+
+extension Notification.Name {
+    static let saveProject = Notification.Name("saveProject")
+    static let saveProjectAs = Notification.Name("saveProjectAs")
+    static let openProject = Notification.Name("openProject")
+    static let exportADV = Notification.Name("exportADV")
+    static let exportADG = Notification.Name("exportADG")
 }
