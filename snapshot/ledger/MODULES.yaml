@@ -1,0 +1,212 @@
+project_shape:
+  scale: multi-subsystem
+  has_subsystem_layer: true
+  expected_modules: "8-12"
+  kind: product
+
+modules:
+  - id: abletonsampler.audio-analysis.audio-import-and-zoning
+    project: AbletonSampler
+    subsystem: Audio Analysis
+    name: Audio Import and Zoning
+    capability: Imports an audio file, resolves sandbox access, and optionally splits the source into named working zones before analysis.
+    status: working
+    approach: Uses AVFoundation decoding plus security-scoped bookmarks and zone-specific state stored in the main audio view model.
+    tech: [SwiftUI, Foundation, AVFoundation, UniformTypeIdentifiers]
+    io:
+      in: "Audio file URLs and optional bookmark data"
+      out: "Decoded sample buffer, zone markers, active zones, and per-zone analysis state"
+    code_refs:
+      - AbletonTest/EnhancedContentView.swift
+      - AbletonTest/ZoneChoiceView.swift
+      - AbletonTest/ZoneSplittingView.swift
+      - AbletonTest/AudioKitExtensions.swift
+    known_gaps:
+      - "Import flow is heavily tied to macOS security-scoped file handling and debug logging."
+      - "Zone import state lives inside one large view model rather than a separate service."
+    match_keywords: [audio import, zone splitting, sandbox bookmarks, waveform segmentation, sample prep]
+
+  - id: abletonsampler.audio-analysis.transient-detection-and-editing
+    project: AbletonSampler
+    subsystem: Audio Analysis
+    name: Transient Detection and Editing
+    capability: Detects transient markers and supports inspection and playback around them; trim and regroup UI may exist, but implementation details are not fully surfaced in the reviewed code.
+    status: working
+    approach: Implements several in-app detection algorithms and stores editable markers, selections, and grouping state in EnhancedAudioViewModel.
+    tech: [SwiftUI, AVFoundation, Accelerate]
+    io:
+      in: "Decoded sample buffers, threshold settings, offsets, and user edits"
+      out: "Transient markers, grouped markers, selections, and audition playback state"
+    code_refs:
+      - AbletonTest/EnhancedContentView.swift
+      - AbletonTest/Models.swift
+      - AbletonTest/DebugView.swift
+    known_gaps:
+      - "No dedicated automated tests cover detection quality or marker editing behavior."
+      - "Multiple detection modes exist, but ledger/PROJECT.md still flags end-to-end feature status as partly unclear."
+    match_keywords: [transient detection, onset detection, marker editing, waveform inspection, sample slicing]
+
+  - id: abletonsampler.audio-analysis.spectral-sample-grouping
+    project: AbletonSampler
+    subsystem: Audio Analysis
+    name: Spectral Sample Grouping
+    capability: Extracts audio features and clusters samples into suggested velocity layers and round-robin groups.
+    status: partial
+    approach: Uses AVFoundation feature extraction with custom clustering, scoring, and diversity ordering across baseline and enhanced grouping implementations.
+    tech: [Foundation, AVFoundation, Accelerate]
+    io:
+      in: "Audio region files or sample URLs plus analysis window and clustering settings"
+      out: "Ordered sample groups, selected cluster counts, and grouping recommendations"
+    code_refs:
+      - AbletonTest/SampleSimilarity.swift
+      - AbletonTest/ImprovedSampleSimilarity.swift
+      - AbletonTest/SpectralGroupingImprovements.swift
+      - AbletonTest/AmplitudeGroupSuggestionView.swift
+    known_gaps:
+      - "There are overlapping grouping implementations, which suggests the area is still experimental."
+      - "Grouping quality is tuned heuristically rather than validated by automated acceptance tests."
+    match_keywords: [sample clustering, spectral grouping, velocity layer suggestion, round robin selection, timbre analysis]
+
+  - id: abletonsampler.audio-analysis.grouping-analysis-harness
+    project: AbletonSampler
+    subsystem: Audio Analysis
+    name: Grouping Analysis Harness
+    capability: Compares manual and automatic grouping results, computes cluster quality metrics, and exports analysis sessions for review.
+    status: partial
+    approach: Runs a custom analysis pipeline with silhouette, Davies-Bouldin, Calinski-Harabasz, rebalance heuristics, and JSON session export.
+    tech: [Foundation, AVFoundation, SwiftUI, UniformTypeIdentifiers]
+    io:
+      in: "Manual group assignments, extracted sample features, and clustering diagnostics"
+      out: "Grouping test sessions, metrics, comparison reports, and exported JSON documents"
+    code_refs:
+      - AbletonTest/SpectralGroupingAnalysis.swift
+      - AbletonTest/AmplitudeGroupSuggestionView.swift
+      - AbletonTest/TestSessionDocument.swift
+    known_gaps:
+      - "The harness exports diagnostics but is not integrated into a repeatable test suite."
+      - "Large analysis logic is concentrated in one file, which makes the workflow harder to swap or validate incrementally."
+    match_keywords: [clustering evaluation, offline analysis, quality metrics, model selection, experiment harness]
+
+  - id: abletonsampler.sample-management.keyboard-and-velocity-mapping
+    project: AbletonSampler
+    subsystem: Sample Management
+    name: Keyboard and Velocity Mapping
+    capability: Maps grouped or dropped samples onto MIDI keys, velocity layers, pitched ranges, and round-robin slots for export.
+    status: working
+    approach: Keeps a piano-key model plus MultiSamplePart records in SamplerViewModel and drives mapping through SwiftUI keyboard and assignment views.
+    tech: [SwiftUI, Foundation, AVFoundation]
+    io:
+      in: "Grouped markers, dropped file URLs, MIDI key targets, and split mode choices"
+      out: "Multi-sample part definitions with key ranges, velocity ranges, round robins, and loop metadata"
+    code_refs:
+      - AbletonTest/SamplerViewModel.swift
+      - AbletonTest/PianoKeyboardView.swift
+      - AbletonTest/GroupToVelocityMapperView.swift
+      - AbletonTest/Models.swift
+      - AbletonTest/ContentView.swift
+    known_gaps:
+      - "Core mapping logic is centralized in a large view model rather than isolated mapping services."
+      - "Mapping behavior has no direct unit coverage in the repository."
+    match_keywords: [keymapping, velocity layers, round robin mapping, multisample editor, sampler zones]
+
+  - id: abletonsampler.sample-management.batch-sample-ingest
+    project: AbletonSampler
+    subsystem: Sample Management
+    name: Batch Sample Ingest
+    capability: Parses filename metadata and bulk-imports note, velocity, and round-robin sample sets into the keyboard mapping model.
+    status: working
+    approach: Uses regex-based filename parsing and a SwiftUI batch import workflow that groups files by detected MIDI note.
+    tech: [SwiftUI, Foundation, UniformTypeIdentifiers]
+    io:
+      in: "Lists of audio file URLs with note and velocity naming conventions"
+      out: "Parsed sample metadata and batch mapping requests into sampler slots"
+    code_refs:
+      - AbletonTest/BatchImportView.swift
+      - AbletonTest/FileNameParser.swift
+      - AbletonTest/SamplerViewModel.swift
+    known_gaps:
+      - "Filename parsing only supports a small set of underscore-based naming patterns."
+      - "Files without parseable note data fall back to a manual path instead of a richer recovery flow."
+    match_keywords: [batch import, filename parser, sample naming convention, multisample ingest, note mapping]
+
+  - id: abletonsampler.sample-management.project-session-persistence
+    project: AbletonSampler
+    subsystem: Sample Management
+    name: Project Session Persistence
+    capability: Saves and reloads analysis, zoning, and mapping state into a custom project document format.
+    status: partial
+    approach: Serializes project state as JSON with bookmark-backed file references and restores it through a shared ProjectFileManager.
+    tech: [Foundation, SwiftUI]
+    io:
+      in: "Current audio analysis state, zones, sample mappings, and project save location"
+      out: "ATP project files and restored in-memory session state"
+    code_refs:
+      - AbletonTest/ProjectFile.swift
+      - AbletonTest/ContentView.swift
+      - AbletonTest/Models.swift
+    known_gaps:
+      - "createdDate is always rewritten during save instead of being preserved."
+      - "The format is versioned as 1.0, but there is no migration path beyond the current schema."
+      - "Marker and zone identities are recreated on load rather than restored from serialized IDs."
+    match_keywords: [project save, session restore, document persistence, bookmark storage, state serialization]
+
+  - id: abletonsampler.sample-management.midi-output-preview
+    project: AbletonSampler
+    subsystem: Sample Management
+    name: MIDI Output Preview
+    capability: Lists MIDI destinations and sends note messages so mapped sounds can be auditioned externally.
+    status: working
+    approach: Uses CoreMIDI client and output port management with simple note-on and note-off helpers.
+    tech: [Foundation, CoreMIDI, os.log]
+    io:
+      in: "Selected MIDI destinations and note events"
+      out: "MIDI messages sent to external endpoints and refreshed destination lists"
+    code_refs:
+      - AbletonTest/MIDIManager.swift
+      - AbletonTest/ContentView.swift
+    known_gaps:
+      - "The module handles output only; there is no MIDI input or richer transport synchronization."
+    match_keywords: [midi output, external audition, note preview, coremidi, device routing]
+
+  - id: abletonsampler.sample-management.waveform-visualization
+    project: AbletonSampler
+    subsystem: Sample Management
+    name: Waveform Visualization
+    capability: Renders zoomable waveform views for inspection, zone editing, and transient-focused interaction.
+    status: mature
+    approach: Combines a vendored Metal-backed Waveform package with a local Canvas-based fallback waveform implementation.
+    tech: [SwiftUI, Metal, MetalKit, AVFoundation]
+    io:
+      in: "Sample buffers plus viewport start, length, zoom, and style settings"
+      out: "Interactive waveform renders used by the editor UI"
+    code_refs:
+      - Waveform/Sources/Waveform/Waveform.swift
+      - Waveform/Sources/Waveform/Renderer.swift
+      - Waveform/Sources/Waveform/Helpers.swift
+      - AbletonTest/SimpleWaveform.swift
+      - AbletonTest/EnhancedContentView.swift
+      - AbletonTest/ZoneSplittingView.swift
+    known_gaps:
+      - "The repo carries both the vendored package and a local simplified waveform view, which increases maintenance surface."
+    match_keywords: [waveform renderer, metal waveform, audio visualization, zoomable waveform, sample editor ui]
+
+  - id: abletonsampler.xml-export.ableton-preset-export
+    project: AbletonSampler
+    subsystem: XML Export
+    name: Ableton Preset Export
+    capability: Generates Ableton Live ADV and ADG preset XML from mapped samples and writes gzip-compressed preset files.
+    status: working
+    approach: Builds XML strings from MultiSamplePart data, compresses them through the system gzip tool, and saves via NSSavePanel.
+    tech: [Foundation, Compression, AppKit, UniformTypeIdentifiers, "/usr/bin/gzip"]
+    io:
+      in: "Mapped sample parts, envelope settings, output preset type, and destination path"
+      out: "Gzipped ADV or ADG preset files with relative sample references"
+    code_refs:
+      - AbletonTest/SamplerViewModel.swift
+      - AbletonTest/ExportXMLView.swift
+      - AbletonTest/ContentView.swift
+      - ADV_FILE_STRUCTURE.md
+    known_gaps:
+      - "Export writes preset files only; sample files still have to be arranged manually under Samples/Imported."
+      - "Compression depends on an external /usr/bin/gzip process instead of an in-process writer."
+    match_keywords: [ableton adv export, adg export, gzipped xml, sampler preset generator, live instrument rack]
