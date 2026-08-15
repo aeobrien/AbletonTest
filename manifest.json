@@ -1,0 +1,23 @@
+{
+  "capture_finished_at_utc": "2026-08-15T00:22:42Z",
+  "capture_started_at_utc": "2026-08-15T00:22:40Z",
+  "captured_at_utc": "2026-08-15T00:22:40Z",
+  "captured_byte_estimate": 5612034,
+  "captured_path_count": 84,
+  "consistency_retry_count": 0,
+  "excluded": [],
+  "github_hard_limit_bytes": 100000000,
+  "guardian_version": "2.0-sidecar",
+  "head_state": "symbolic",
+  "host": "aidans-mac-mini",
+  "racy_capture": false,
+  "repository_id": "AbletonSampler-f2e603c7e238",
+  "schema_version": 1,
+  "snapshot_blob_threshold_bytes": 94371840,
+  "snapshot_consistency": "stable",
+  "source_branch": "main",
+  "source_head_oid": "421304586dc729bf12bf0d4457f9865c2adf70d8",
+  "source_index_sha256": "7ebefa27dc5d932905463704ab3b0116068c8a4151e72a30db55c86a121f3b0f",
+  "source_path": "/Users/aidanobrien/Dev/AbletonSampler",
+  "upstream_observed": "origin/main"
+}
