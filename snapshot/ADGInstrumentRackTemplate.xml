@@ -1,0 +1,423 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Ableton Instrument Rack Group (.adg) Template
+  This file provides the structure for creating an Instrument Rack preset.
+
+  WHEN TO USE THIS TEMPLATE VS THE DRUM RACK TEMPLATE:
+  ====================================================
+  Use this Instrument Rack template when:
+  - Creating layered or split keyboard instruments (piano layers, orchestral sections, etc.)
+  - Building performance instruments with key/velocity/chain selector switching
+  - Designing synth patches with multiple sound sources that blend or crossfade
+  - Making instruments that respond to continuous controller input for sound selection
+  - Creating instruments where MIDI notes maintain their pitch across the keyboard
+
+  Use the Drum Rack template (ADGTemplate.xml) when:
+  - Building drum kits where each pad triggers a different sound
+  - Creating percussion instruments with distinct samples per pad
+  - Making instruments where each note needs independent mixing/effects
+  - Designing grid-based controllers (like for triggering clips or one-shots)
+  - Building instruments where MIDI notes are remapped to specific pitches
+
+  KEY DIFFERENCES:
+  - Instrument Racks use InstrumentGroupDevice and can layer/split by key, velocity, and chain selector
+  - Drum Racks use DrumGroupDevice and map individual sounds to specific MIDI notes (pads)
+  - Instrument Racks maintain pitch relationships; Drum Racks treat each pad independently
+  - Instrument Racks use BranchSelectorRange; Drum Racks use ReceivingNote/SendingNote
+
+  Values are placeholders and should be replaced with actual desired settings.
+-->
+<Ableton MajorVersion="5" MinorVersion="12.0_12203" SchemaChangeCount="3" Creator="Ableton Live 12.2.1" Revision="c0d59beb0465cc1bcc75830dbff2b10a48082a7d">
+	<!-- The top-level element for a device group preset like an Instrument Rack. -->
+	<GroupDevicePreset>
+		<OverwriteProtectionNumber Value="0" /> <!-- Internal Ableton value. Keep as 0. -->
+
+		<!-- =============================================================================== -->
+		<!-- INSTRUMENT RACK DEVICE DEFINITION                                               -->
+		<!-- This section contains the main parameters for the Instrument Rack itself.       -->
+		<!-- =============================================================================== -->
+		<Device>
+			<InstrumentGroupDevice Id="0">
+				<LomId Value="0" /> <!-- Internal Live Object Model ID. Keep as 0. -->
+				<LomIdView Value="0" /> <!-- Internal view state ID. Keep as 0. -->
+				<IsExpanded Value="true" /> <!-- Determines if the device chain view is expanded. -->
+				<On>
+					<Manual Value="true" /> <!-- Master On/Off switch for the entire Instrument Rack. -->
+				</On>
+				<UserName Value="Your_Instrument_Rack_Name" /> <!-- The name of the preset, visible in Live's browser. -->
+				<Annotation Value="Your_Notes_Here" /> <!-- Corresponds to the info text box for the device. -->
+
+				<!-- Macro Controls Section -->
+				<!-- Instrument Racks have 16 Macro Controls. This section defines their state. -->
+				<!-- For simplicity, only one is shown here. -->
+				<MacroControls.0>
+					<LomId Value="0" />
+					<Manual Value="63" /> <!-- The value of the Macro knob (0-127). Default center is 63. -->
+					<MidiControllerRange>
+						<Min Value="0" />
+						<Max Value="127" />
+					</MidiControllerRange>
+				</MacroControls.0>
+				<!-- ... Other MacroControls.1 through MacroControls.15 would go here ... -->
+
+				<MacroDisplayNames.0 Value="Macro 1" /> <!-- The user-visible name of the Macro. -->
+				<!-- ... Other MacroDisplayNames would go here ... -->
+
+				<!-- Chain Selector Control -->
+				<!-- This is unique to Instrument Racks and allows switching between chains. -->
+				<ChainSelector>
+					<LomId Value="0" />
+					<Manual Value="0" /> <!-- Current chain selector value (0-127) -->
+					<MidiControllerRange>
+						<Min Value="0" />
+						<Max Value="127" />
+					</MidiControllerRange>
+				</ChainSelector>
+
+				<!-- Rack-level settings -->
+				<IsAutoSelectEnabled Value="false" /> <!-- Auto-selects a chain when played. Usually false for Instrument Racks. -->
+				<IsBranchesListVisible Value="true" /> <!-- Determines if the chain list is visible. -->
+				<IsRangesEditorVisible Value="false" /> <!-- Shows the key/velocity/selector zone editor. -->
+				<AreDevicesVisible Value="true" /> <!-- Shows devices within chains. -->
+				<AreMacroControlsVisible Value="true" /> <!-- Shows the macro controls. -->
+
+				<!-- This wrapper holds the list of chains. It is populated by the <BranchPresets> below. -->
+				<ChainsListWrapper LomId="0" />
+			</InstrumentGroupDevice>
+		</Device>
+
+		<!-- A reference to the default preset for this device type. -->
+		<PresetRef>
+			<AbletonDefaultPresetRef Id="0">
+				<DeviceId Name="InstrumentGroupDevice" />
+			</AbletonDefaultPresetRef>
+		</PresetRef>
+
+		<!-- =============================================================================== -->
+		<!-- INSTRUMENT CHAINS (BRANCHES) SECTION                                            -->
+		<!-- This is where each individual chain and its contained instrument is defined.    -->
+		<!-- Add a new <InstrumentBranchPreset> for each chain you want to create.          -->
+		<!-- =============================================================================== -->
+		<BranchPresets>
+
+			<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+			<!-- EXAMPLE 1: SINGLE CHAIN COVERING FULL RANGE                                 -->
+			<!-- This creates one chain that responds to all MIDI input.                     -->
+			<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+			<InstrumentBranchPreset Id="0">
+				<Name Value="Main_Chain" /> <!-- The name of the chain, visible in the chain list. -->
+				<IsSoloed Value="false" /> <!-- Whether this chain is soloed. -->
+
+				<!-- This section contains the instrument(s) loaded into this chain. -->
+				<DevicePresets>
+					<!-- This is the wrapper for our instrument. -->
+					<AbletonDevicePreset Id="0">
+						<!--
+						  DEVICE DEFINITION FOR THE CHAIN
+						  This is where you embed the full XML for an instrument (.adv file).
+						  You can paste the entire contents of an .adv file here.
+						-->
+						<Device>
+							<MultiSampler Id="0">
+								<!--
+								===========================================================
+								=== COMPLETE DEVICE STRUCTURE REQUIRED                   ===
+								===========================================================
+								Include the COMPLETE MultiSampler structure from an .adv file.
+								This includes all metadata, Player section, Pitch, Filter, etc.
+								See ADVTemplate.xml for the full MultiSampler structure.
+								-->
+								<LomId Value="0" />
+								<LomIdView Value="0" />
+								<IsExpanded Value="true" />
+								<On>
+									<LomId Value="0" />
+									<Manual Value="true" />
+								</On>
+								<UserName Value="Sampler" />
+								<Annotation Value="" />
+
+								<!-- Paste the rest of your .adv instrument structure here -->
+								<Player>
+									<!-- Your sample data -->
+								</Player>
+								<!-- ... Pitch, Filter, VolumeAndPan, Globals, etc. ... -->
+							</MultiSampler>
+						</Device>
+
+						<!-- Optional: Reference to an external .adv file instead of embedding -->
+						<PresetRef>
+							<FilePresetRef Id="0">
+								<FileRef>
+									<RelativePathType Value="1" /> <!-- 1 = Relative to the .adg file's location -->
+									<RelativePath Value="My_Instrument_Preset.adv" />
+								</FileRef>
+							</FilePresetRef>
+						</PresetRef>
+					</AbletonDevicePreset>
+				</DevicePresets>
+
+				<!-- This section defines the mixer settings for this chain (Volume, Pan, Sends). -->
+				<MixerPreset>
+					<AbletonDevicePreset Id="0">
+						<Device>
+							<AudioBranchMixerDevice Id="0">
+								<Volume> <Manual Value="1" /> </Volume> <!-- Linear gain, 1 = 0dB -->
+								<Panorama> <Manual Value="0" /> </Panorama> <!-- -1 to 1 -->
+								<Mute> <Manual Value="false" /> </Mute>
+								<Solo> <Manual Value="false" /> </Solo>
+							</AudioBranchMixerDevice>
+						</Device>
+					</AbletonDevicePreset>
+				</MixerPreset>
+
+				<!--
+				  BRANCH SELECTOR RANGE
+				  This defines when this chain is active based on the Chain Selector value.
+				  This is unique to Instrument Racks and allows for morphing between chains.
+				-->
+				<BranchSelectorRange>
+					<Min Value="0" />     <!-- Minimum selector value for this chain -->
+					<Max Value="127" />   <!-- Maximum selector value for this chain -->
+					<CrossfadeMin Value="0" />    <!-- Start of crossfade region -->
+					<CrossfadeMax Value="127" />  <!-- End of crossfade region -->
+				</BranchSelectorRange>
+
+				<!--
+				  ZONE SETTINGS
+				  This defines the key and velocity ranges for this chain.
+				  Unlike Drum Racks, Instrument Racks use ranges, not specific note mappings.
+				-->
+				<ZoneSettings>
+					<!--
+					  KeyRange: The MIDI note range this chain responds to.
+					  Use this to create keyboard splits (e.g., bass in left hand, lead in right).
+					-->
+					<KeyRange>
+						<Min Value="0" />    <!-- Lowest MIDI note (0=C-2) -->
+						<Max Value="127" />  <!-- Highest MIDI note (127=G8) -->
+						<CrossfadeMin Value="0" />    <!-- Start of key crossfade -->
+						<CrossfadeMax Value="127" />  <!-- End of key crossfade -->
+					</KeyRange>
+
+					<!--
+					  VelocityRange: The velocity range this chain responds to.
+					  Use this to create velocity layers (e.g., soft samples at low velocity).
+					-->
+					<VelocityRange>
+						<Min Value="0" />    <!-- Minimum velocity -->
+						<Max Value="127" />  <!-- Maximum velocity -->
+						<CrossfadeMin Value="0" />    <!-- Start of velocity crossfade -->
+						<CrossfadeMax Value="127" />  <!-- End of velocity crossfade -->
+					</VelocityRange>
+				</ZoneSettings>
+			</InstrumentBranchPreset>
+
+			<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+			<!-- EXAMPLE 2: VELOCITY LAYERED CHAINS                                          -->
+			<!-- This example shows two chains that respond to different velocity ranges.    -->
+			<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+			<!-- Soft Layer (Velocity 1-64) -->
+			<InstrumentBranchPreset Id="1">
+				<Name Value="Soft_Layer" />
+				<IsSoloed Value="false" />
+				<DevicePresets>
+					<!-- Your soft instrument here -->
+				</DevicePresets>
+				<MixerPreset>
+					<!-- Mixer settings -->
+				</MixerPreset>
+				<BranchSelectorRange>
+					<Min Value="0" />
+					<Max Value="127" />
+					<CrossfadeMin Value="0" />
+					<CrossfadeMax Value="127" />
+				</BranchSelectorRange>
+				<ZoneSettings>
+					<KeyRange>
+						<Min Value="0" />
+						<Max Value="127" />
+					</KeyRange>
+					<VelocityRange>
+						<Min Value="1" />
+						<Max Value="64" />
+						<CrossfadeMin Value="1" />
+						<CrossfadeMax Value="70" /> <!-- Crossfade into loud layer -->
+					</VelocityRange>
+				</ZoneSettings>
+			</InstrumentBranchPreset>
+
+			<!-- Loud Layer (Velocity 65-127) -->
+			<InstrumentBranchPreset Id="2">
+				<Name Value="Loud_Layer" />
+				<IsSoloed Value="false" />
+				<DevicePresets>
+					<!-- Your loud instrument here -->
+				</DevicePresets>
+				<MixerPreset>
+					<!-- Mixer settings -->
+				</MixerPreset>
+				<BranchSelectorRange>
+					<Min Value="0" />
+					<Max Value="127" />
+					<CrossfadeMin Value="0" />
+					<CrossfadeMax Value="127" />
+				</BranchSelectorRange>
+				<ZoneSettings>
+					<KeyRange>
+						<Min Value="0" />
+						<Max Value="127" />
+					</KeyRange>
+					<VelocityRange>
+						<Min Value="58" /> <!-- Overlap with soft layer for crossfade -->
+						<Max Value="127" />
+						<CrossfadeMin Value="58" />
+						<CrossfadeMax Value="127" />
+					</VelocityRange>
+				</ZoneSettings>
+			</InstrumentBranchPreset>
+
+			<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+			<!-- EXAMPLE 3: CHAIN SELECTOR SWITCHING                                         -->
+			<!-- These chains respond to different Chain Selector values.                    -->
+			<!-- Map the Chain Selector to a MIDI controller for live switching.             -->
+			<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+			<!-- Chain A (Selector 0-42) -->
+			<InstrumentBranchPreset Id="3">
+				<Name Value="Sound_A" />
+				<IsSoloed Value="false" />
+				<DevicePresets>
+					<!-- Your instrument A here -->
+				</DevicePresets>
+				<MixerPreset>
+					<!-- Mixer settings -->
+				</MixerPreset>
+				<BranchSelectorRange>
+					<Min Value="0" />
+					<Max Value="42" />
+					<CrossfadeMin Value="0" />
+					<CrossfadeMax Value="48" /> <!-- Crossfade into Sound B -->
+				</BranchSelectorRange>
+				<ZoneSettings>
+					<KeyRange>
+						<Min Value="0" />
+						<Max Value="127" />
+					</KeyRange>
+					<VelocityRange>
+						<Min Value="0" />
+						<Max Value="127" />
+					</VelocityRange>
+				</ZoneSettings>
+			</InstrumentBranchPreset>
+
+			<!-- Chain B (Selector 43-85) -->
+			<InstrumentBranchPreset Id="4">
+				<Name Value="Sound_B" />
+				<IsSoloed Value="false" />
+				<DevicePresets>
+					<!-- Your instrument B here -->
+				</DevicePresets>
+				<MixerPreset>
+					<!-- Mixer settings -->
+				</MixerPreset>
+				<BranchSelectorRange>
+					<Min Value="37" /> <!-- Overlap with A for crossfade -->
+					<Max Value="85" />
+					<CrossfadeMin Value="37" />
+					<CrossfadeMax Value="91" /> <!-- Crossfade into Sound C -->
+				</BranchSelectorRange>
+				<ZoneSettings>
+					<KeyRange>
+						<Min Value="0" />
+						<Max Value="127" />
+					</KeyRange>
+					<VelocityRange>
+						<Min Value="0" />
+						<Max Value="127" />
+					</VelocityRange>
+				</ZoneSettings>
+			</InstrumentBranchPreset>
+
+			<!-- Chain C (Selector 86-127) -->
+			<InstrumentBranchPreset Id="5">
+				<Name Value="Sound_C" />
+				<IsSoloed Value="false" />
+				<DevicePresets>
+					<!-- Your instrument C here -->
+				</DevicePresets>
+				<MixerPreset>
+					<!-- Mixer settings -->
+				</MixerPreset>
+				<BranchSelectorRange>
+					<Min Value="80" /> <!-- Overlap with B for crossfade -->
+					<Max Value="127" />
+					<CrossfadeMin Value="80" />
+					<CrossfadeMax Value="127" />
+				</BranchSelectorRange>
+				<ZoneSettings>
+					<KeyRange>
+						<Min Value="0" />
+						<Max Value="127" />
+					</KeyRange>
+					<VelocityRange>
+						<Min Value="0" />
+						<Max Value="127" />
+					</VelocityRange>
+				</ZoneSettings>
+			</InstrumentBranchPreset>
+
+			<!-- ... You can add more chains here ... -->
+
+		</BranchPresets>
+
+		<!-- Return chains for the rack would be defined here. -->
+		<ReturnBranchPresets />
+
+	</GroupDevicePreset>
+
+	<!--
+	===============================================================================
+	SUMMARY OF KEY REQUIREMENTS FOR INSTRUMENT RACK ADG FILES:
+	===============================================================================
+
+	1. USE InstrumentGroupDevice NOT DrumGroupDevice
+	   Instrument Racks use a different device type that supports continuous pitch
+	   and sophisticated chain selection.
+
+	2. USE InstrumentBranchPreset NOT DrumBranchPreset
+	   Each chain in an Instrument Rack is an InstrumentBranchPreset.
+
+	3. INCLUDE BranchSelectorRange BEFORE ZoneSettings
+	   This defines when the chain is active based on the Chain Selector value.
+	   It enables morphing and switching between different instrument chains.
+
+	4. ZONE SETTINGS USE RANGES NOT NOTE MAPPINGS
+	   Unlike Drum Racks which map to specific notes, Instrument Racks use:
+	   - KeyRange: Define the keyboard range (with optional crossfades)
+	   - VelocityRange: Define the velocity response (with optional crossfades)
+	   DO NOT use ReceivingNote, SendingNote, or ChokeGroup
+
+	5. CHAIN SELECTOR FOR DYNAMIC SWITCHING
+	   The Chain Selector (0-127) can be automated or MIDI-mapped to switch
+	   between chains in real-time, perfect for performance instruments.
+
+	6. CROSSFADING FOR SMOOTH TRANSITIONS
+	   Use CrossfadeMin/Max in ranges to create smooth transitions between
+	   chains instead of hard switches.
+
+	7. COMPLETE DEVICE EMBEDDING
+	   When embedding devices, include the ENTIRE device structure with all
+	   metadata, not just the Player/Pitch/Filter sections.
+
+	8. TYPICAL USE CASES
+	   - Orchestral instruments with different articulations
+	   - Synthesizers with multiple oscillator configurations
+	   - Pianos with soft/medium/hard velocity layers
+	   - Hybrid instruments that morph between different timbres
+	   - Performance rigs with switchable sounds
+
+	===============================================================================
+	-->
+</Ableton>
