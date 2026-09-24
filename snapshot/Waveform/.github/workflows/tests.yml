@@ -1,0 +1,34 @@
+name: Tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build ${{ matrix.scheme }} (Xcode ${{ matrix.xcode_version }})
+    # NOTE: macos-latest is NOT equivalent to macos-12 as of September 2022.
+    # Source: https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners#supported-runners-and-hardware-resources
+    runs-on: macos-12
+    strategy:
+      # Setting 'fail-fast' to 'true' implies the build will fail the first time it encounters an error.
+      fail-fast: false
+      matrix:
+        xcode_version:
+          - '13.2' # swift 5.5
+          - '13.4' # swift 5.6
+    steps:
+      - uses: actions/checkout@v3
+      - name: build 
+        run: swift build
+
+  # Send notification to Discord on failure.
+  send_notification:
+    name: Send Notification
+    uses: AudioKit/ci/.github/workflows/send_notification.yml@main
+    needs: [build]
+    if: ${{ failure() && github.ref == 'refs/heads/main' }}
+    secrets: inherit
